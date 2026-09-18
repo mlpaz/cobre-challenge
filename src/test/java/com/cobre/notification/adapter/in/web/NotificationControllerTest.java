@@ -17,6 +17,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.cobre.notification.domain.exception.NotificationDeliveryException;
+import com.cobre.notification.domain.exception.SubscriptionNotConfirmedException;
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.port.in.SendNotificationUseCase;
@@ -68,6 +69,19 @@ class NotificationControllerTest {
 	}
 
 	@Test
+	void returnsOkWithADuplicateStatusWhenTheEventWasAlreadyDelivered() throws Exception {
+		given(sendNotificationUseCase.sendNotification(any()))
+				.willReturn(new DeliveryResult("EVT001", DeliveryStatus.DUPLICATE, null));
+
+		mockMvc.perform(post("/notification_events")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(VALID_PAYLOAD))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.event_id").value("EVT001"))
+				.andExpect(jsonPath("$.delivery_status").value("DUPLICATE"));
+	}
+
+	@Test
 	void returnsServiceUnavailableWhenDeliveryFails() throws Exception {
 		given(sendNotificationUseCase.sendNotification(any()))
 				.willThrow(new NotificationDeliveryException("provider circuit breaker is open", null));
@@ -77,6 +91,18 @@ class NotificationControllerTest {
 						.content(VALID_PAYLOAD))
 				.andExpect(status().isServiceUnavailable())
 				.andExpect(jsonPath("$.code").value("NOTIFICATION_DELIVERY_FAILED"));
+	}
+
+	@Test
+	void returnsForbiddenWhenThereIsNoActiveSubscriptionForTheEvent() throws Exception {
+		given(sendNotificationUseCase.sendNotification(any()))
+				.willThrow(new SubscriptionNotConfirmedException("no active subscription"));
+
+		mockMvc.perform(post("/notification_events")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(VALID_PAYLOAD))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.code").value("SUBSCRIPTION_NOT_CONFIRMED"));
 	}
 
 	@Test

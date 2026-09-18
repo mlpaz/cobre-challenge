@@ -8,6 +8,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import com.cobre.notification.adapter.in.web.dto.ErrorResponse;
 import com.cobre.notification.domain.exception.NotificationDeliveryException;
+import com.cobre.notification.domain.exception.SubscriptionCheckException;
+import com.cobre.notification.domain.exception.SubscriptionNotConfirmedException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -16,6 +18,18 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ErrorResponse> handleDeliveryFailure(NotificationDeliveryException ex) {
 		return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
 				.body(new ErrorResponse("NOTIFICATION_DELIVERY_FAILED", ex.getMessage()));
+	}
+
+	@ExceptionHandler(SubscriptionNotConfirmedException.class)
+	public ResponseEntity<ErrorResponse> handleSubscriptionNotConfirmed(SubscriptionNotConfirmedException ex) {
+		return ResponseEntity.status(HttpStatus.FORBIDDEN)
+				.body(new ErrorResponse("SUBSCRIPTION_NOT_CONFIRMED", ex.getMessage()));
+	}
+
+	@ExceptionHandler(SubscriptionCheckException.class)
+	public ResponseEntity<ErrorResponse> handleSubscriptionCheckFailure(SubscriptionCheckException ex) {
+		return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+				.body(new ErrorResponse("SUBSCRIPTION_CHECK_FAILED", ex.getMessage()));
 	}
 
 	@ExceptionHandler(MethodArgumentNotValidException.class)
