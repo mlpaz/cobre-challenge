@@ -5,19 +5,13 @@
 - **Java 27** (toolchain fijado en `build.gradle`)
 - **Gradle 9.7.1** (via wrapper, `./gradlew`)
 - **Spring Boot 4.1.1**, PostgreSQL + Flyway, Spring Kafka, Resilience4j (retry), Datadog (DogStatsD), SpringDoc OpenAPI
+- **Virtual threads** (`spring.threads.virtual.enabled=true`): todo el I/O de este servicio es bloqueante (RestClient, JPA, el servlet container) — no hay nada reactivo. Los virtual threads dejan escalar ese I/O bloqueante (muchas conexiones esperando respuesta a la vez: DB, Kafka, el Notification Provider) sin necesitar un stack reactivo ni tunear pools de threads a mano.
 
 ## Descripción
 
 Servicio que consume eventos generados por la plataforma (vía Kafka, o vía HTTP para pruebas), los deduplica, busca si el cliente tiene un webhook suscripto a ese tipo de evento, entrega el evento a través de un **Notification Provider** externo (que reenvía al webhook del cliente), y persiste el resultado de cada intento. Expone además una API de self-service para consultar el historial de eventos por cliente y reintentar (`replay`) los que fallaron.
 
 Arquitectura hexagonal: el dominio (`domain/`) no conoce Kafka, HTTP, Postgres ni Datadog — solo define puertos (`port/in`, `port/out`) que los adaptadores (`adapter/in`, `adapter/out`) implementan.
-
-## Documentación técnica (OpenAPI)
-
-La API REST se documenta automáticamente con **SpringDoc OpenAPI** (`springdoc-openapi-starter-webmvc-ui`), a partir de los controllers y las anotaciones `@Tag` / `@Operation` / `@Parameter` / `@ApiResponse` puestas en `NotificationController` y `SubscriptionController`. Con la app corriendo:
-
-- Spec en JSON: `GET /v3/api-docs`
-- UI interactiva (Swagger UI): `GET /swagger-ui.html` (sirve `/swagger-ui/index.html`)
 
 ## Arquitectura
 
@@ -38,7 +32,6 @@ flowchart LR
     WebhookA["Webhook cliente A"]
     WebhookB["Webhook cliente B"]
     WebhookN["Webhook cliente N"]
-    Datadog[("Datadog Agent<br/>DogStatsD")]
 
     Kafka -->|evento| Listener
     HTTPClients -->|HTTP| API
@@ -50,14 +43,12 @@ flowchart LR
     Provider --> WebhookA
     Provider --> WebhookB
     Provider --> WebhookN
-    Core -.->|métricas| Datadog
 ```
 
 - **Kafka**: fuente principal de eventos (`notification.events.topic`). El listener y el endpoint `POST /notification_events` alimentan el mismo caso de uso.
 - **PostgreSQL**: `notification_events` (resultado final de cada evento procesado, una fila por `client_id + event_id`) y `subscriptions` (webhook activo por `user_id + event_type`, **más el score y el estado del circuit breaker de ese webhook** — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)).
 - **Idempotency cache**: mapa en memoria (`InMemoryIdempotencyStore`), clave = `event_id`, TTL configurable. Evita reentregar un evento ya delivered dentro de la ventana; el estado durable de "ya entregado" vive en la DB (`delivery_status`), no acá (más detalle en [Idempotencia y resiliencia](#idempotencia-y-resiliencia)).
 - **Notification Provider**: servicio externo al que le pegamos por HTTP (con retry); es quien efectivamente llama al webhook del cliente. El circuit breaker vive por webhook, en la tabla `subscriptions` (ver [Suscripciones y webhooks](#suscripciones-y-webhooks)), así el webhook roto de un cliente no bloquea la entrega a los demás.
-- **Datadog**: métricas emitidas vía DogStatsD contra un agente local (ver [Métricas](#métricas)).
 
 ## Flujo principal
 
@@ -152,7 +143,10 @@ Transiciones (`WebhookCircuitBreakerJpaAdapter`):
 
 ### El replay nunca queda bloqueado
 
-`POST /notification_events/{id}/replay` (reintento manual) **ignora** el estado del circuit breaker: siempre intenta la entrega real, incluso con el webhook en `OPEN`. Es la vía deliberada para recuperar un evento puntual sin esperar la ventana de `HALF_OPEN`. Su resultado sí se registra en el score — una racha de replays exitosos puede cerrar el circuito antes de que termine la ventana de espera, sin necesidad de tráfico automático.
+`POST /notification_events/{id}/replay` (reintento manual) **ignora** tanto el circuit breaker del webhook como la caché de idempotencia — las dos cosas que sí frenan el flujo automático:
+
+- **Circuit breaker**: siempre intenta la entrega real, incluso con el webhook en `OPEN`. Es la vía deliberada para recuperar un evento puntual sin esperar la ventana de `HALF_OPEN`. Su resultado sí se registra en el score — una racha de replays exitosos puede cerrar el circuito antes de que termine la ventana de espera, sin necesidad de tráfico automático.
+- **Idempotencia**: `NotificationEventReplayService` nunca consulta `IdempotencyPort.isDuplicate` — esa caché existe para no reentregar un evento en el flujo automático (ver [Idempotencia](#idempotencia)), no para decidir si un reintento manual puede o no ejecutarse. Lo que sí bloquea un replay es el `delivery_status` persistido: si ya está `DELIVERED`, es un no-op (ver más abajo), pero eso lo decide la base, no la caché en memoria.
 
 ## Otros endpoints
 
@@ -237,3 +231,10 @@ Dos niveles, cada uno con su propio balde (no comparten cupo):
 | `rate-limit.strict.refill-period` | Igual que `general.refill-period`, para el nivel estricto. |
 
 Un request bloqueado devuelve `429` con `{"code": "RATE_LIMITED", "message": "..."}`.
+
+## Documentación técnica (OpenAPI)
+
+La API REST se documenta automáticamente con **SpringDoc OpenAPI** (`springdoc-openapi-starter-webmvc-ui`), a partir de los controllers y las anotaciones `@Tag` / `@Operation` / `@Parameter` / `@ApiResponse` puestas en `NotificationController` y `SubscriptionController`. Con la app corriendo:
+
+- Spec en JSON: `GET /v3/api-docs`
+- UI interactiva (Swagger UI): `GET /swagger-ui.html` (sirve `/swagger-ui/index.html`)

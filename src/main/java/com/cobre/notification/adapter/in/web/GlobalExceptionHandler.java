@@ -14,6 +14,7 @@ import com.cobre.notification.adapter.in.web.dto.ErrorResponse;
 import com.cobre.notification.domain.exception.InvalidPaginationException;
 import com.cobre.notification.domain.exception.NotificationEventAccessDeniedException;
 import com.cobre.notification.domain.exception.NotificationEventNotFoundException;
+import com.cobre.notification.domain.exception.SubscriptionNotFoundException;
 import com.cobre.notification.domain.port.out.MetricsPort;
 
 @RestControllerAdvice
@@ -72,5 +73,11 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ErrorResponse> handleNotFound(NotificationEventNotFoundException ex) {
 		return ResponseEntity.status(HttpStatus.NOT_FOUND)
 				.body(new ErrorResponse("NOTIFICATION_EVENT_NOT_FOUND", ex.getMessage()));
+	}
+
+	@ExceptionHandler(SubscriptionNotFoundException.class)
+	public ResponseEntity<ErrorResponse> handleSubscriptionNotFound(SubscriptionNotFoundException ex) {
+		return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(new ErrorResponse("SUBSCRIPTION_NOT_FOUND", ex.getMessage()));
 	}
 }

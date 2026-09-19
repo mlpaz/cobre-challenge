@@ -88,6 +88,27 @@ class NotificationEventReplayServiceTest {
 	}
 
 	@Test
+	void attemptsDeliveryEvenWhenTheIdempotencyCacheAlreadyMarksTheEventAsProcessed() {
+		// The idempotency cache is a duplicate-delivery guard for the automatic
+		// flow (see NotificationDeliveryService), not a gate on manual replay: a
+		// deliberate retry must always be able to reach the provider. The durable
+		// delivery_status (checked below) is what actually blocks a re-delivered
+		// DELIVERED event, not this cache.
+		NotificationEventReplayService service = newService();
+		NotificationEventRecord record = aRecord(DeliveryStatus.FAILED, null);
+		given(queryPort.findById(NOTIFICATION_EVENT_ID)).willReturn(Optional.of(record));
+		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment")).willReturn(Optional.of(WEBHOOK_URL));
+		DeliveryResult expected = new DeliveryResult("EVT001", DeliveryStatus.DELIVERED, "ref-new");
+		given(notificationProviderPort.deliver(any(), any())).willReturn(expected);
+
+		DeliveryResult result = service.replay(NOTIFICATION_EVENT_ID, "CLIENT001");
+
+		assertThat(result).isEqualTo(expected);
+		verify(notificationProviderPort).deliver(any(), any());
+		verify(idempotencyPort, never()).isDuplicate(any());
+	}
+
+	@Test
 	void doesNotContactTheProviderAgainWhenTheEventIsAlreadyDelivered() {
 		NotificationEventReplayService service = newService();
 		NotificationEventRecord record = aRecord(DeliveryStatus.DELIVERED, "ref-old");

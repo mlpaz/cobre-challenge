@@ -1,6 +1,7 @@
 package com.cobre.notification.adapter.out.subscription;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import org.springframework.stereotype.Component;
@@ -30,5 +31,12 @@ public class SubscriptionJpaAdapter implements SubscriptionPort {
 				.ifPresentOrElse(
 						existing -> existing.updateWebHookUrl(subscription.webHookUrl()),
 						() -> repository.save(new SubscriptionEntity(subscription, Instant.now())));
+	}
+
+	@Override
+	public List<Subscription> findByUserId(String userId) {
+		return repository.findByUserIdOrderByEventTypeAsc(userId).stream()
+				.map(entity -> new Subscription(entity.getUserId(), entity.getEventType(), entity.getWebHookUrl()))
+				.toList();
 	}
 }

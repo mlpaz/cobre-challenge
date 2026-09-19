@@ -1,5 +1,6 @@
 package com.cobre.notification.domain.port.out;
 
+import java.util.List;
 import java.util.Optional;
 
 import com.cobre.notification.domain.model.Subscription;
@@ -17,4 +18,7 @@ public interface SubscriptionPort {
 	 * exists for this (user, event type) pair.
 	 */
 	void save(Subscription subscription);
+
+	/** @return every subscription for this user, one per event type. */
+	List<Subscription> findByUserId(String userId);
 }
