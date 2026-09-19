@@ -15,11 +15,8 @@ import com.cobre.notification.domain.port.out.IdempotencyPort;
  * deployment needs a real shared KVS so every instance sees the same dedup
  * state, otherwise two instances could each deliver the same event once.
  *
- * <p>Keyed by {@code client_id + event_id} — the natural unique identifier of
- * one specific event occurrence. Deliberately not keyed by
- * {@code event_type + client_id}: two distinct events of the same type for
- * the same client (e.g. two separate card payments) must both be delivered,
- * not collapsed into one.
+ * <p>Keyed by {@code event_id} alone: event ids are unique platform-wide, so
+ * no other field is needed to identify one specific event occurrence.
  */
 public class InMemoryIdempotencyStore implements IdempotencyPort {
 
@@ -49,6 +46,6 @@ public class InMemoryIdempotencyStore implements IdempotencyPort {
 	}
 
 	private static String key(NotificationEvent event) {
-		return event.clientId() + ":" + event.eventId();
+		return event.eventId();
 	}
 }

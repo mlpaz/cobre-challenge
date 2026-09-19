@@ -1,13 +1,13 @@
 package com.cobre.notification.domain.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import java.time.Instant;
+import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -15,17 +15,19 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.cobre.notification.domain.exception.NotificationDeliveryException;
-import com.cobre.notification.domain.exception.SubscriptionNotConfirmedException;
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.out.IdempotencyPort;
+import com.cobre.notification.domain.port.out.MetricsPort;
 import com.cobre.notification.domain.port.out.NotificationProviderPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
 
 @ExtendWith(MockitoExtension.class)
 class NotificationDeliveryServiceTest {
+
+	private static final String WEBHOOK_URL = "https://client.example.com/webhooks/notifications";
 
 	@Mock
 	private IdempotencyPort idempotencyPort;
@@ -39,50 +41,59 @@ class NotificationDeliveryServiceTest {
 	@Mock
 	private NotificationRecordPort notificationRecordPort;
 
+	@Mock
+	private MetricsPort metricsPort;
+
 	@Test
-	void delegatesDeliveryToTheOutboundPortAndRecordsTheResultWhenTheSubscriptionIsConfirmed() {
+	void delegatesDeliveryToTheOutboundPortAndRecordsTheResultWhenThereIsAnActiveSubscription() {
 		NotificationDeliveryService service = newService();
 		NotificationEvent event = anEvent();
 		DeliveryResult expected = new DeliveryResult(event.eventId(), DeliveryStatus.DELIVERED, "ref-1");
 		given(idempotencyPort.isDuplicate(event)).willReturn(false);
-		given(subscriptionPort.isSubscribed(event)).willReturn(true);
-		given(notificationProviderPort.deliver(event)).willReturn(expected);
+		given(subscriptionPort.findWebHookUrl(event.clientId(), event.eventType())).willReturn(Optional.of(WEBHOOK_URL));
+		given(notificationProviderPort.deliver(event, WEBHOOK_URL)).willReturn(expected);
 
 		DeliveryResult result = service.sendNotification(event);
 
 		assertThat(result).isEqualTo(expected);
-		verify(notificationProviderPort).deliver(event);
+		verify(notificationProviderPort).deliver(event, WEBHOOK_URL);
 		verify(idempotencyPort).markAsProcessed(event);
 		verify(notificationRecordPort).save(event, expected);
+		verify(metricsPort).increment("notification.events.received", "event_type:credit_card_payment");
+		verify(metricsPort).increment("notification.subscription.webhook_found", "event_type:credit_card_payment");
+		verify(metricsPort).increment("notification.events.saved", "delivery_status:DELIVERED");
 	}
 
 	@Test
-	void recordsAndRejectsTheEventWithoutCallingTheProviderWhenThereIsNoActiveSubscription() {
+	void returnsNotSubscribedWithoutCallingTheProviderWhenThereIsNoWebHookUrl() {
 		NotificationDeliveryService service = newService();
 		NotificationEvent event = anEvent();
 		given(idempotencyPort.isDuplicate(event)).willReturn(false);
-		given(subscriptionPort.isSubscribed(event)).willReturn(false);
+		given(subscriptionPort.findWebHookUrl(event.clientId(), event.eventType())).willReturn(Optional.empty());
 
-		assertThatThrownBy(() -> service.sendNotification(event))
-				.isInstanceOf(SubscriptionNotConfirmedException.class);
-		verify(notificationProviderPort, never()).deliver(any());
+		DeliveryResult result = service.sendNotification(event);
+
+		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.NOT_SUBSCRIBED, null));
+		verify(notificationProviderPort, never()).deliver(any(), any());
 		verify(idempotencyPort, never()).markAsProcessed(any());
-		verify(notificationRecordPort).save(event, new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null));
+		verify(notificationRecordPort, never()).save(any(), any());
+		verify(metricsPort).increment("notification.subscription.webhook_not_found", "event_type:credit_card_payment");
 	}
 
 	@Test
-	void recordsAndPropagatesDeliveryExceptionsFromTheOutboundPortAndDoesNotMarkItAsProcessed() {
+	void returnsAndRecordsAFailedResultWhenTheOutboundPortThrowsInsteadOfPropagatingIt() {
 		NotificationDeliveryService service = newService();
 		NotificationEvent event = anEvent();
 		given(idempotencyPort.isDuplicate(event)).willReturn(false);
-		given(subscriptionPort.isSubscribed(event)).willReturn(true);
-		given(notificationProviderPort.deliver(any())).willThrow(new NotificationDeliveryException("boom", null));
+		given(subscriptionPort.findWebHookUrl(event.clientId(), event.eventType())).willReturn(Optional.of(WEBHOOK_URL));
+		given(notificationProviderPort.deliver(any(), any())).willThrow(new NotificationDeliveryException("boom", null));
 
-		assertThatThrownBy(() -> service.sendNotification(event))
-				.isInstanceOf(NotificationDeliveryException.class)
-				.hasMessageContaining("boom");
+		DeliveryResult result = service.sendNotification(event);
+
+		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null));
 		verify(idempotencyPort, never()).markAsProcessed(any());
 		verify(notificationRecordPort).save(event, new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null));
+		verify(metricsPort).increment("notification.events.saved", "delivery_status:FAILED");
 	}
 
 	@Test
@@ -94,14 +105,15 @@ class NotificationDeliveryServiceTest {
 		DeliveryResult result = service.sendNotification(event);
 
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.DUPLICATE, null));
-		verify(subscriptionPort, never()).isSubscribed(any());
-		verify(notificationProviderPort, never()).deliver(any());
+		verify(subscriptionPort, never()).findWebHookUrl(any(), any());
+		verify(notificationProviderPort, never()).deliver(any(), any());
 		verify(notificationRecordPort, never()).save(any(), any());
+		verify(metricsPort).increment("notification.events.duplicate", "event_type:credit_card_payment");
 	}
 
 	private NotificationDeliveryService newService() {
 		return new NotificationDeliveryService(idempotencyPort, subscriptionPort, notificationProviderPort,
-				notificationRecordPort);
+				notificationRecordPort, metricsPort);
 	}
 
 	private static NotificationEvent anEvent() {

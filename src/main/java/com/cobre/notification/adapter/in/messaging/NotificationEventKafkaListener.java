@@ -7,8 +7,8 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 import com.cobre.notification.adapter.in.messaging.dto.NotificationEventMessage;
-import com.cobre.notification.domain.exception.NotificationDeliveryException;
-import com.cobre.notification.domain.exception.SubscriptionNotConfirmedException;
+import com.cobre.notification.domain.model.DeliveryResult;
+import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.in.SendNotificationUseCase;
 
@@ -20,18 +20,16 @@ import tools.jackson.databind.json.JsonMapper;
  * {@code NotificationController} calls. This is the production entry point;
  * the platform emits events onto this topic instead of calling us over HTTP.
  *
- * <p>Business-level outcomes (no active subscription, or delivery definitely
- * failed after the outbound adapter's own retry/circuit-breaker strategy is
- * exhausted) are terminal for this event: we log them and let the offset
- * commit, we do not ask Kafka to redeliver. Retrying an already
- * circuit-broken call at the Kafka level would just hammer the provider
- * again. Any other, unexpected exception (e.g. a malformed message) is left
- * to propagate to the listener container's error handler, which applies a
- * bounded backoff before giving up on that record.
- *
- * <p>TODO: once notification event storage exists (self-service API), persist
- * REJECTED/FAILED outcomes there instead of only logging them, so they can be
- * queried and replayed via {@code POST /notification_events/{id}/replay}.
+ * <p>{@link SendNotificationUseCase#sendNotification} never throws for a
+ * business/delivery outcome (no subscription, delivery definitely failed
+ * after the outbound adapter's own retry/circuit-breaker strategy is
+ * exhausted): it always returns a result and records it. We deliberately do
+ * not fail this listener on a bad outcome — throwing here would make Kafka
+ * redeliver the record and hammer the provider again on top of the
+ * retry/circuit-breaker strategy that already ran. Only a genuinely
+ * unexpected exception (e.g. a malformed message) propagates to the listener
+ * container's error handler, which applies a bounded backoff before giving up
+ * on that record.
  */
 @Component
 public class NotificationEventKafkaListener {
@@ -50,12 +48,9 @@ public class NotificationEventKafkaListener {
 	public void onMessage(ConsumerRecord<String, String> record) {
 		NotificationEventMessage message = jsonMapper.readValue(record.value(), NotificationEventMessage.class);
 		NotificationEvent event = NotificationEventMessageMapper.toDomain(message);
-		try {
-			sendNotificationUseCase.sendNotification(event);
-		} catch (SubscriptionNotConfirmedException e) {
-			log.warn("Skipping event {}: {}", event.eventId(), e.getMessage());
-		} catch (NotificationDeliveryException e) {
-			log.error("Delivery definitely failed for event {}: {}", event.eventId(), e.getMessage(), e);
+		DeliveryResult result = sendNotificationUseCase.sendNotification(event);
+		if (result.status() == DeliveryStatus.FAILED) {
+			log.error("Delivery definitely failed for event {}", event.eventId());
 		}
 	}
 }

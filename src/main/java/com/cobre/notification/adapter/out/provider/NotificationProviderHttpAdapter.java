@@ -22,9 +22,9 @@ public class NotificationProviderHttpAdapter implements NotificationProviderPort
 	}
 
 	@Override
-	public DeliveryResult deliver(NotificationEvent event) {
+	public DeliveryResult deliver(NotificationEvent event, String webHookUrl) {
 		try {
-			ProviderNotificationResponse response = httpClient.send(toProviderRequest(event));
+			ProviderNotificationResponse response = httpClient.send(toProviderRequest(event, webHookUrl));
 			return new DeliveryResult(event.eventId(), DeliveryStatus.DELIVERED, response.reference());
 		} catch (CallNotPermittedException e) {
 			throw new NotificationDeliveryException(
@@ -37,12 +37,13 @@ public class NotificationProviderHttpAdapter implements NotificationProviderPort
 		}
 	}
 
-	private static ProviderNotificationRequest toProviderRequest(NotificationEvent event) {
+	private static ProviderNotificationRequest toProviderRequest(NotificationEvent event, String webHookUrl) {
 		return new ProviderNotificationRequest(
 				event.eventId(),
 				event.eventType(),
 				event.content(),
 				event.deliveryDate(),
-				event.clientId());
+				event.clientId(),
+				webHookUrl);
 	}
 }

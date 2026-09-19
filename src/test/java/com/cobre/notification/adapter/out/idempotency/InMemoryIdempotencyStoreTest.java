@@ -61,7 +61,7 @@ class InMemoryIdempotencyStoreTest {
 	}
 
 	@Test
-	void doesNotCollideTheSameEventIdAcrossDifferentClients() {
+	void treatsTheSameEventIdAsADuplicateRegardlessOfOtherFields() {
 		InMemoryIdempotencyStore store = new InMemoryIdempotencyStore(
 				new IdempotencyProperties(Duration.ofMinutes(10)), Clock.systemUTC());
 		NotificationEvent sameIdOtherClient = new NotificationEvent(event.eventId(), event.eventType(),
@@ -69,7 +69,7 @@ class InMemoryIdempotencyStoreTest {
 
 		store.markAsProcessed(event);
 
-		assertThat(store.isDuplicate(sameIdOtherClient)).isFalse();
+		assertThat(store.isDuplicate(sameIdOtherClient)).isTrue();
 	}
 
 	private static final class MutableClock extends Clock {

@@ -7,12 +7,13 @@ import com.cobre.notification.domain.model.NotificationEvent;
 public interface NotificationProviderPort {
 
 	/**
-	 * Delivers the event to the Notification Provider.
+	 * Delivers the event to the Notification Provider, telling it which
+	 * webhook URL to call.
 	 *
 	 * @throws NotificationDeliveryException when the provider rejects the event,
 	 *                                        stays unavailable after the retry
 	 *                                        strategy is exhausted, or the circuit
 	 *                                        breaker is open.
 	 */
-	DeliveryResult deliver(NotificationEvent event);
+	DeliveryResult deliver(NotificationEvent event, String webHookUrl);
 }

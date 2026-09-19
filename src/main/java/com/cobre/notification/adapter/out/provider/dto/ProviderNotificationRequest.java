@@ -7,5 +7,6 @@ public record ProviderNotificationRequest(
 		String eventType,
 		String content,
 		Instant deliveryDate,
-		String clientId) {
+		String clientId,
+		String webHookUrl) {
 }

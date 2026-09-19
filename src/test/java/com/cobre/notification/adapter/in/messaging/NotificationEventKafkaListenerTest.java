@@ -12,8 +12,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import com.cobre.notification.domain.exception.NotificationDeliveryException;
-import com.cobre.notification.domain.exception.SubscriptionNotConfirmedException;
+import com.cobre.notification.domain.model.DeliveryResult;
+import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.in.SendNotificationUseCase;
 
@@ -43,6 +43,8 @@ class NotificationEventKafkaListenerTest {
 	@Test
 	void mapsTheRecordAndInvokesTheUseCase() {
 		NotificationEventKafkaListener listener = new NotificationEventKafkaListener(sendNotificationUseCase, jsonMapper);
+		given(sendNotificationUseCase.sendNotification(any()))
+				.willReturn(new DeliveryResult("EVT001", DeliveryStatus.DELIVERED, "ref-1"));
 
 		listener.onMessage(record(VALID_PAYLOAD));
 
@@ -52,19 +54,10 @@ class NotificationEventKafkaListenerTest {
 	}
 
 	@Test
-	void doesNotPropagateWhenThereIsNoActiveSubscription() {
+	void doesNotThrowWhenDeliveryDefinitelyFailed() {
 		NotificationEventKafkaListener listener = new NotificationEventKafkaListener(sendNotificationUseCase, jsonMapper);
 		given(sendNotificationUseCase.sendNotification(any()))
-				.willThrow(new SubscriptionNotConfirmedException("no active subscription"));
-
-		assertThatCode(() -> listener.onMessage(record(VALID_PAYLOAD))).doesNotThrowAnyException();
-	}
-
-	@Test
-	void doesNotPropagateWhenDeliveryDefinitelyFailed() {
-		NotificationEventKafkaListener listener = new NotificationEventKafkaListener(sendNotificationUseCase, jsonMapper);
-		given(sendNotificationUseCase.sendNotification(any()))
-				.willThrow(new NotificationDeliveryException("circuit breaker open", null));
+				.willReturn(new DeliveryResult("EVT001", DeliveryStatus.FAILED, null));
 
 		assertThatCode(() -> listener.onMessage(record(VALID_PAYLOAD))).doesNotThrowAnyException();
 	}

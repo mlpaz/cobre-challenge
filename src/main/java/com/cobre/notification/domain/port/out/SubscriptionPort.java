@@ -1,18 +1,20 @@
 package com.cobre.notification.domain.port.out;
 
-import com.cobre.notification.domain.exception.SubscriptionCheckException;
-import com.cobre.notification.domain.model.NotificationEvent;
+import java.util.Optional;
+
+import com.cobre.notification.domain.model.Subscription;
 
 public interface SubscriptionPort {
 
 	/**
-	 * Confirms, against the subscription registry, that {@code event} must be
-	 * delivered. A subscription is keyed by client and event type, so a
-	 * positive answer also confirms the event actually belongs to that
-	 * client — a client can never be subscribed to another client's events.
-	 *
-	 * @throws SubscriptionCheckException when the subscription registry
-	 *                                     cannot be reached to confirm it.
+	 * @return the webhook URL subscribed for this (user, event type) pair, or
+	 *         empty if there is none — there is nowhere to deliver this event.
 	 */
-	boolean isSubscribed(NotificationEvent event);
+	Optional<String> findWebHookUrl(String userId, String eventType);
+
+	/**
+	 * Creates a subscription, or updates the webhook URL if one already
+	 * exists for this (user, event type) pair.
+	 */
+	void save(Subscription subscription);
 }

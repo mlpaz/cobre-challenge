@@ -2,6 +2,7 @@ package com.cobre.notification.adapter.out.provider;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
@@ -12,6 +13,7 @@ import java.time.Duration;
 import java.time.Instant;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -21,6 +23,7 @@ import org.springframework.web.client.RestClient;
 import com.cobre.notification.adapter.out.provider.config.NotificationProviderProperties;
 import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationRequest;
 import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationResponse;
+import com.cobre.notification.domain.port.out.MetricsPort;
 
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 
@@ -33,7 +36,10 @@ class NotificationProviderHttpClientTest {
 	private static final String URL = "http://notification-provider.local/notifications";
 
 	private final ProviderNotificationRequest request = new ProviderNotificationRequest("EVT001",
-			"credit_card_payment", "Payment received", Instant.parse("2024-03-15T09:30:22Z"), "CLIENT001");
+			"credit_card_payment", "Payment received", Instant.parse("2024-03-15T09:30:22Z"), "CLIENT001",
+			"https://client.example.com/webhooks/notifications");
+
+	private final MetricsPort metricsPort = Mockito.mock(MetricsPort.class);
 
 	@Test
 	void succeedsOnTheFirstAttempt() {
@@ -44,12 +50,14 @@ class NotificationProviderHttpClientTest {
 				.andRespond(withSuccess("{\"reference\":\"ref-1\"}", MediaType.APPLICATION_JSON));
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10), 50, 10, 100));
+				properties(3, Duration.ofMillis(10), 50, 10, 100), metricsPort);
 
 		ProviderNotificationResponse response = client.send(request);
 
 		assertThat(response).isEqualTo(new ProviderNotificationResponse("ref-1"));
 		server.verify();
+		verify(metricsPort).increment("notification.webhook.response", "status_code:200",
+				"event_type:credit_card_payment");
 	}
 
 	@Test
@@ -59,10 +67,12 @@ class NotificationProviderHttpClientTest {
 		server.expect(requestTo(URL)).andRespond(withStatus(HttpStatus.BAD_REQUEST));
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10), 50, 10, 100));
+				properties(3, Duration.ofMillis(10), 50, 10, 100), metricsPort);
 
 		assertThatThrownBy(() -> client.send(request)).isInstanceOf(NotificationProviderRejectedException.class);
 		server.verify();
+		verify(metricsPort).increment("notification.webhook.response", "status_code:400",
+				"event_type:credit_card_payment");
 	}
 
 	@Test
@@ -73,7 +83,7 @@ class NotificationProviderHttpClientTest {
 		server.expect(requestTo(URL)).andRespond(withSuccess("{\"reference\":\"ref-2\"}", MediaType.APPLICATION_JSON));
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10), 50, 10, 100));
+				properties(3, Duration.ofMillis(10), 50, 10, 100), metricsPort);
 
 		ProviderNotificationResponse response = client.send(request);
 
@@ -90,7 +100,7 @@ class NotificationProviderHttpClientTest {
 		}
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10), 50, 10, 100));
+				properties(3, Duration.ofMillis(10), 50, 10, 100), metricsPort);
 
 		assertThatThrownBy(() -> client.send(request)).isInstanceOf(NotificationProviderTransientException.class);
 		server.verify();
@@ -107,7 +117,7 @@ class NotificationProviderHttpClientTest {
 		// circuit breaker outcome; a sliding window of 2 with a 50% threshold opens the
 		// circuit right after those two failures.
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(1, Duration.ofMillis(10), 50, 2, 2));
+				properties(1, Duration.ofMillis(10), 50, 2, 2), metricsPort);
 
 		assertThatThrownBy(() -> client.send(request)).isInstanceOf(NotificationProviderTransientException.class);
 		assertThatThrownBy(() -> client.send(request)).isInstanceOf(NotificationProviderTransientException.class);

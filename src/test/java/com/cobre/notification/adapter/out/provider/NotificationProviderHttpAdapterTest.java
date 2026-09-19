@@ -25,6 +25,8 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 @ExtendWith(MockitoExtension.class)
 class NotificationProviderHttpAdapterTest {
 
+	private static final String WEBHOOK_URL = "https://client.example.com/webhooks/notifications";
+
 	@Mock
 	private NotificationProviderHttpClient httpClient;
 
@@ -34,11 +36,11 @@ class NotificationProviderHttpAdapterTest {
 	@Test
 	void mapsTheProviderResponseIntoADeliveredResult() {
 		given(httpClient.send(new ProviderNotificationRequest(event.eventId(), event.eventType(), event.content(),
-				event.deliveryDate(), event.clientId())))
+				event.deliveryDate(), event.clientId(), WEBHOOK_URL)))
 				.willReturn(new ProviderNotificationResponse("ref-123"));
 
 		NotificationProviderHttpAdapter adapter = new NotificationProviderHttpAdapter(httpClient);
-		DeliveryResult result = adapter.deliver(event);
+		DeliveryResult result = adapter.deliver(event, WEBHOOK_URL);
 
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.DELIVERED, "ref-123"));
 	}
@@ -51,7 +53,7 @@ class NotificationProviderHttpAdapterTest {
 
 		NotificationProviderHttpAdapter adapter = new NotificationProviderHttpAdapter(httpClient);
 
-		assertThatThrownBy(() -> adapter.deliver(event))
+		assertThatThrownBy(() -> adapter.deliver(event, WEBHOOK_URL))
 				.isInstanceOf(NotificationDeliveryException.class)
 				.hasCauseInstanceOf(CallNotPermittedException.class);
 	}
@@ -63,7 +65,7 @@ class NotificationProviderHttpAdapterTest {
 
 		NotificationProviderHttpAdapter adapter = new NotificationProviderHttpAdapter(httpClient);
 
-		assertThatThrownBy(() -> adapter.deliver(event))
+		assertThatThrownBy(() -> adapter.deliver(event, WEBHOOK_URL))
 				.isInstanceOf(NotificationDeliveryException.class)
 				.hasCauseInstanceOf(NotificationProviderTransientException.class);
 	}
@@ -75,7 +77,7 @@ class NotificationProviderHttpAdapterTest {
 
 		NotificationProviderHttpAdapter adapter = new NotificationProviderHttpAdapter(httpClient);
 
-		assertThatThrownBy(() -> adapter.deliver(event))
+		assertThatThrownBy(() -> adapter.deliver(event, WEBHOOK_URL))
 				.isInstanceOf(NotificationDeliveryException.class)
 				.hasCauseInstanceOf(NotificationProviderRejectedException.class);
 	}
