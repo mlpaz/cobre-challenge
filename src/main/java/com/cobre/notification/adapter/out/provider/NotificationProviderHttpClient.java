@@ -16,19 +16,23 @@ import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationReque
 import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationResponse;
 import com.cobre.notification.domain.port.out.MetricsPort;
 
-import io.github.resilience4j.circuitbreaker.CircuitBreaker;
-import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
 
 /**
- * Technical HTTP client for the Notification Provider. Owns the resilience
- * strategy (retry + circuit breaker) for this specific outbound dependency,
- * fully driven by {@link NotificationProviderProperties}. Wired as a bean by
+ * Technical HTTP client for the Notification Provider. Owns the retry
+ * strategy for this specific outbound dependency, fully driven by
+ * {@link NotificationProviderProperties}. Wired as a bean by
  * {@link NotificationProviderClientConfig} rather than component-scanned,
- * since construction needs to combine three independently built collaborators
- * (RestClient, Retry, CircuitBreaker) from configuration properties.
+ * since construction needs to combine independently built collaborators
+ * (RestClient, Retry) from configuration properties.
+ *
+ * <p>Deliberately has no circuit breaker at this level: the Notification
+ * Provider is shared by every client, so a provider-wide breaker would let
+ * one client's consistently-failing webhook trip the circuit for everybody
+ * else's healthy webhooks too. That protection instead lives per webhook —
+ * see {@link com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort}.
  */
 public class NotificationProviderHttpClient {
 
@@ -37,7 +41,6 @@ public class NotificationProviderHttpClient {
 	private final RestClient restClient;
 	private final String path;
 	private final Retry retry;
-	private final CircuitBreaker circuitBreaker;
 	private final MetricsPort metricsPort;
 
 	public NotificationProviderHttpClient(NotificationProviderProperties properties, MetricsPort metricsPort) {
@@ -46,22 +49,19 @@ public class NotificationProviderHttpClient {
 
 	/**
 	 * Visible for tests: allows binding a {@link RestClient} to a mock HTTP
-	 * server while still exercising the real retry/circuit-breaker behavior.
+	 * server while still exercising the real retry behavior.
 	 */
 	NotificationProviderHttpClient(RestClient restClient, NotificationProviderProperties properties,
 			MetricsPort metricsPort) {
 		this.path = properties.path();
 		this.restClient = restClient;
 		this.retry = buildRetry(properties.retry());
-		this.circuitBreaker = buildCircuitBreaker(properties.circuitBreaker());
 		this.metricsPort = metricsPort;
 	}
 
 	public ProviderNotificationResponse send(ProviderNotificationRequest request) {
 		Supplier<ProviderNotificationResponse> call = () -> doPost(request);
-		Supplier<ProviderNotificationResponse> resilientCall = Retry.decorateSupplier(retry,
-				CircuitBreaker.decorateSupplier(circuitBreaker, call));
-		return resilientCall.get();
+		return Retry.decorateSupplier(retry, call).get();
 	}
 
 	private ProviderNotificationResponse doPost(ProviderNotificationRequest request) {
@@ -94,7 +94,8 @@ public class NotificationProviderHttpClient {
 
 	private void recordWebhookResponse(ProviderNotificationRequest request, String statusCode) {
 		metricsPort.increment("notification.webhook.response", "status_code:" + statusCode,
-				"event_type:" + request.eventType());
+				"event_type:" + request.eventType(), "client_id:" + request.clientId(),
+				"webhook:" + request.webHookUrl());
 	}
 
 	private static NotificationProviderTransientException transientException(ProviderNotificationRequest request,
@@ -121,22 +122,9 @@ public class NotificationProviderHttpClient {
 				.maxAttempts(properties.maxAttempts())
 				.intervalFunction(intervalFunction)
 				// Only transient (5xx/timeout/connection) failures are retried; rejections
-				// (4xx) and an open circuit breaker fail fast instead.
+				// (4xx) fail fast instead.
 				.retryOnException(ex -> ex instanceof NotificationProviderTransientException)
 				.build();
 		return Retry.of("notificationProvider", retryConfig);
-	}
-
-	private static CircuitBreaker buildCircuitBreaker(NotificationProviderProperties.CircuitBreaker properties) {
-		CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom()
-				.slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
-				.slidingWindowSize(properties.slidingWindowSize())
-				.minimumNumberOfCalls(properties.minimumNumberOfCalls())
-				.failureRateThreshold(properties.failureRateThreshold())
-				.waitDurationInOpenState(properties.waitDurationInOpenState())
-				.permittedNumberOfCallsInHalfOpenState(properties.permittedNumberOfCallsInHalfOpenState())
-				.recordExceptions(NotificationProviderTransientException.class)
-				.build();
-		return CircuitBreaker.of("notificationProvider", circuitBreakerConfig);
 	}
 }

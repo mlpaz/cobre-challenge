@@ -1,5 +1,7 @@
 package com.cobre.notification.adapter.in.web;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -12,9 +14,18 @@ import com.cobre.notification.adapter.in.web.dto.ErrorResponse;
 import com.cobre.notification.domain.exception.InvalidPaginationException;
 import com.cobre.notification.domain.exception.NotificationEventAccessDeniedException;
 import com.cobre.notification.domain.exception.NotificationEventNotFoundException;
+import com.cobre.notification.domain.port.out.MetricsPort;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+	private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+	private final MetricsPort metricsPort;
+
+	public GlobalExceptionHandler(MetricsPort metricsPort) {
+		this.metricsPort = metricsPort;
+	}
 
 	@ExceptionHandler(MethodArgumentNotValidException.class)
 	public ResponseEntity<ErrorResponse> handleValidationFailure(MethodArgumentNotValidException ex) {
@@ -47,6 +58,12 @@ public class GlobalExceptionHandler {
 
 	@ExceptionHandler(NotificationEventAccessDeniedException.class)
 	public ResponseEntity<ErrorResponse> handleAccessDenied(NotificationEventAccessDeniedException ex) {
+		// Security-relevant: a caller's x-user-id didn't match the owner of the
+		// requested event — worth its own trail (IDOR/enumeration probing) beyond
+		// just the 400 response. See A09 in the README's Seguridad section.
+		log.warn("Access denied: x-user-id={} requested notification_event_id={} it does not own",
+				ex.requestedByUserId(), ex.notificationEventId());
+		metricsPort.increment("notification.security.access_denied", "client_id:" + ex.requestedByUserId());
 		return ResponseEntity.status(HttpStatus.BAD_REQUEST)
 				.body(new ErrorResponse("USER_MISMATCH", ex.getMessage()));
 	}

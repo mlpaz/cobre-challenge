@@ -3,6 +3,7 @@ package com.cobre.notification.adapter.in.web;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -32,6 +33,7 @@ import com.cobre.notification.domain.model.PagedResult;
 import com.cobre.notification.domain.port.in.QueryNotificationEventsUseCase;
 import com.cobre.notification.domain.port.in.ReplayNotificationEventUseCase;
 import com.cobre.notification.domain.port.in.SendNotificationUseCase;
+import com.cobre.notification.domain.port.out.MetricsPort;
 
 import tools.jackson.databind.PropertyNamingStrategies;
 import tools.jackson.databind.json.JsonMapper;
@@ -47,6 +49,9 @@ class NotificationControllerTest {
 
 	@Mock
 	private ReplayNotificationEventUseCase replayNotificationEventUseCase;
+
+	@Mock
+	private MetricsPort metricsPort;
 
 	private MockMvc mockMvc;
 
@@ -70,7 +75,7 @@ class NotificationControllerTest {
 		NotificationEventQueryProperties queryProperties = new NotificationEventQueryProperties(20, 100, 10000);
 		mockMvc = MockMvcBuilders.standaloneSetup(new NotificationController(sendNotificationUseCase,
 						queryNotificationEventsUseCase, replayNotificationEventUseCase, queryProperties))
-				.setControllerAdvice(new GlobalExceptionHandler())
+				.setControllerAdvice(new GlobalExceptionHandler(metricsPort))
 				.setMessageConverters(new JacksonJsonHttpMessageConverter(jsonMapper))
 				.build();
 	}
@@ -192,11 +197,12 @@ class NotificationControllerTest {
 	@Test
 	void returnsBadRequestWhenTheHeaderDoesNotMatchTheEventOwner() throws Exception {
 		given(queryNotificationEventsUseCase.getEvent(eq(notificationEventId), eq("OTHER_CLIENT")))
-				.willThrow(new NotificationEventAccessDeniedException("mismatch"));
+				.willThrow(new NotificationEventAccessDeniedException(notificationEventId, "OTHER_CLIENT"));
 
 		mockMvc.perform(get("/notification_events/" + notificationEventId).header("x-user-id", "OTHER_CLIENT"))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.code").value("USER_MISMATCH"));
+		verify(metricsPort).increment("notification.security.access_denied", "client_id:OTHER_CLIENT");
 	}
 
 	@Test
@@ -225,11 +231,12 @@ class NotificationControllerTest {
 	@Test
 	void returnsBadRequestWhenReplayingAnEventThatBelongsToAnotherUser() throws Exception {
 		given(replayNotificationEventUseCase.replay(eq(notificationEventId), eq("OTHER_CLIENT")))
-				.willThrow(new NotificationEventAccessDeniedException("mismatch"));
+				.willThrow(new NotificationEventAccessDeniedException(notificationEventId, "OTHER_CLIENT"));
 
 		mockMvc.perform(post("/notification_events/" + notificationEventId + "/replay")
 						.header("x-user-id", "OTHER_CLIENT"))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.code").value("USER_MISMATCH"));
+		verify(metricsPort).increment("notification.security.access_denied", "client_id:OTHER_CLIENT");
 	}
 }

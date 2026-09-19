@@ -10,20 +10,11 @@ public record NotificationProviderProperties(
 		String path,
 		Duration connectTimeout,
 		Duration readTimeout,
-		Retry retry,
-		CircuitBreaker circuitBreaker) {
+		Retry retry) {
 
 	public record Retry(
 			int maxAttempts,
 			Duration waitDuration,
 			double exponentialBackoffMultiplier) {
-	}
-
-	public record CircuitBreaker(
-			float failureRateThreshold,
-			int slidingWindowSize,
-			int minimumNumberOfCalls,
-			Duration waitDurationInOpenState,
-			int permittedNumberOfCallsInHalfOpenState) {
 	}
 }

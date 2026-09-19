@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
@@ -18,12 +19,20 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.cobre.notification.domain.model.Subscription;
 import com.cobre.notification.domain.port.in.SubscribeUseCase;
+import com.cobre.notification.domain.port.out.MetricsPort;
 
 import tools.jackson.databind.PropertyNamingStrategies;
 import tools.jackson.databind.json.JsonMapper;
 
 @ExtendWith(MockitoExtension.class)
 class SubscriptionControllerTest {
+
+	private static final String VALID_PAYLOAD = """
+			{
+			  "event_type": "credit_card_payment",
+			  "web_hook_url": "https://client.example.com/webhooks/notifications"
+			}
+			""";
 
 	@Mock
 	private SubscribeUseCase subscribeUseCase;
@@ -36,24 +45,17 @@ class SubscriptionControllerTest {
 				.propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
 				.build();
 		mockMvc = MockMvcBuilders.standaloneSetup(new SubscriptionController(subscribeUseCase))
-				.setControllerAdvice(new GlobalExceptionHandler())
+				.setControllerAdvice(new GlobalExceptionHandler(Mockito.mock(MetricsPort.class)))
 				.setMessageConverters(new JacksonJsonHttpMessageConverter(jsonMapper))
 				.build();
 	}
 
 	@Test
-	void createsTheSubscriptionAndReturnsCreated() throws Exception {
-		String payload = """
-				{
-				  "user_id": "CLIENT001",
-				  "event_type": "credit_card_payment",
-				  "web_hook_url": "https://client.example.com/webhooks/notifications"
-				}
-				""";
-
+	void createsTheSubscriptionForTheUserInTheHeaderAndReturnsCreated() throws Exception {
 		mockMvc.perform(post("/subscriptions")
+						.header("x-user-id", "CLIENT001")
 						.contentType(MediaType.APPLICATION_JSON)
-						.content(payload))
+						.content(VALID_PAYLOAD))
 				.andExpect(status().isCreated())
 				.andExpect(jsonPath("$.user_id").value("CLIENT001"))
 				.andExpect(jsonPath("$.event_type").value("credit_card_payment"))
@@ -64,16 +66,25 @@ class SubscriptionControllerTest {
 	}
 
 	@Test
+	void returnsBadRequestWhenTheUserIdHeaderIsMissing() throws Exception {
+		mockMvc.perform(post("/subscriptions")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(VALID_PAYLOAD))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.code").value("MISSING_HEADER"));
+	}
+
+	@Test
 	void returnsBadRequestWhenTheWebHookUrlIsNotAValidUrl() throws Exception {
 		String payload = """
 				{
-				  "user_id": "CLIENT001",
 				  "event_type": "credit_card_payment",
 				  "web_hook_url": "not-a-url"
 				}
 				""";
 
 		mockMvc.perform(post("/subscriptions")
+						.header("x-user-id", "CLIENT001")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content(payload))
 				.andExpect(status().isBadRequest())
@@ -84,12 +95,12 @@ class SubscriptionControllerTest {
 	void returnsBadRequestWhenRequiredFieldsAreMissing() throws Exception {
 		String payload = """
 				{
-				  "event_type": "credit_card_payment",
 				  "web_hook_url": "https://client.example.com/webhooks/notifications"
 				}
 				""";
 
 		mockMvc.perform(post("/subscriptions")
+						.header("x-user-id", "CLIENT001")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content(payload))
 				.andExpect(status().isBadRequest())

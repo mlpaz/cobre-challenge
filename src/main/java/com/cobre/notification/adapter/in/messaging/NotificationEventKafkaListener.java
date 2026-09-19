@@ -21,13 +21,13 @@ import tools.jackson.databind.json.JsonMapper;
  * the platform emits events onto this topic instead of calling us over HTTP.
  *
  * <p>{@link SendNotificationUseCase#sendNotification} never throws for a
- * business/delivery outcome (no subscription, delivery definitely failed
- * after the outbound adapter's own retry/circuit-breaker strategy is
- * exhausted): it always returns a result and records it. We deliberately do
- * not fail this listener on a bad outcome — throwing here would make Kafka
- * redeliver the record and hammer the provider again on top of the
- * retry/circuit-breaker strategy that already ran. Only a genuinely
- * unexpected exception (e.g. a malformed message) propagates to the listener
+ * business/delivery outcome (no subscription, that webhook's circuit breaker
+ * is open, or delivery definitely failed after the outbound adapter's own
+ * retry strategy is exhausted): it always returns a result and records it.
+ * We deliberately do not fail this listener on a bad outcome — throwing here
+ * would make Kafka redeliver the record and hammer the provider again on top
+ * of the retry strategy that already ran. Only a genuinely unexpected
+ * exception (e.g. a malformed message) propagates to the listener
  * container's error handler, which applies a bounded backoff before giving up
  * on that record.
  */
@@ -51,6 +51,8 @@ public class NotificationEventKafkaListener {
 		DeliveryResult result = sendNotificationUseCase.sendNotification(event);
 		if (result.status() == DeliveryStatus.FAILED) {
 			log.error("Delivery definitely failed for event {}", event.eventId());
+		} else if (result.status() == DeliveryStatus.CIRCUIT_OPEN) {
+			log.warn("Delivery skipped for event {}: webhook circuit breaker is open", event.eventId());
 		}
 	}
 }

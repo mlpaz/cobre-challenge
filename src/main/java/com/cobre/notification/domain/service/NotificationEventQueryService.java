@@ -31,8 +31,7 @@ public class NotificationEventQueryService implements QueryNotificationEventsUse
 		NotificationEventRecord record = queryPort.findById(notificationEventId)
 				.orElseThrow(() -> new NotificationEventNotFoundException(notificationEventId));
 		if (!record.clientId().equals(userId)) {
-			throw new NotificationEventAccessDeniedException(
-					"The notification event does not belong to the requesting user");
+			throw new NotificationEventAccessDeniedException(notificationEventId, userId);
 		}
 		return record;
 	}

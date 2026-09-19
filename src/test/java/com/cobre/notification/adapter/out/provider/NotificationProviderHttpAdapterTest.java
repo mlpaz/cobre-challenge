@@ -18,10 +18,6 @@ import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 
-import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
-import io.github.resilience4j.circuitbreaker.CircuitBreaker;
-import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
-
 @ExtendWith(MockitoExtension.class)
 class NotificationProviderHttpAdapterTest {
 
@@ -43,19 +39,6 @@ class NotificationProviderHttpAdapterTest {
 		DeliveryResult result = adapter.deliver(event, WEBHOOK_URL);
 
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.DELIVERED, "ref-123"));
-	}
-
-	@Test
-	void translatesAnOpenCircuitBreakerIntoADeliveryException() {
-		CircuitBreaker circuitBreaker = CircuitBreaker.of("test", CircuitBreakerConfig.ofDefaults());
-		given(httpClient.send(org.mockito.ArgumentMatchers.any()))
-				.willThrow(CallNotPermittedException.createCallNotPermittedException(circuitBreaker));
-
-		NotificationProviderHttpAdapter adapter = new NotificationProviderHttpAdapter(httpClient);
-
-		assertThatThrownBy(() -> adapter.deliver(event, WEBHOOK_URL))
-				.isInstanceOf(NotificationDeliveryException.class)
-				.hasCauseInstanceOf(CallNotPermittedException.class);
 	}
 
 	@Test

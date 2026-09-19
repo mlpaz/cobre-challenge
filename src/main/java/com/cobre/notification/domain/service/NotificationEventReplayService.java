@@ -18,6 +18,7 @@ import com.cobre.notification.domain.port.out.NotificationEventQueryPort;
 import com.cobre.notification.domain.port.out.NotificationProviderPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
+import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
 
 @Service
 public class NotificationEventReplayService implements ReplayNotificationEventUseCase {
@@ -27,15 +28,17 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 	private final NotificationProviderPort notificationProviderPort;
 	private final NotificationRecordPort notificationRecordPort;
 	private final IdempotencyPort idempotencyPort;
+	private final WebhookCircuitBreakerPort webhookCircuitBreakerPort;
 
 	public NotificationEventReplayService(NotificationEventQueryPort queryPort, SubscriptionPort subscriptionPort,
 			NotificationProviderPort notificationProviderPort, NotificationRecordPort notificationRecordPort,
-			IdempotencyPort idempotencyPort) {
+			IdempotencyPort idempotencyPort, WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
 		this.queryPort = queryPort;
 		this.subscriptionPort = subscriptionPort;
 		this.notificationProviderPort = notificationProviderPort;
 		this.notificationRecordPort = notificationRecordPort;
 		this.idempotencyPort = idempotencyPort;
+		this.webhookCircuitBreakerPort = webhookCircuitBreakerPort;
 	}
 
 	@Override
@@ -43,8 +46,7 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 		NotificationEventRecord record = queryPort.findById(notificationEventId)
 				.orElseThrow(() -> new NotificationEventNotFoundException(notificationEventId));
 		if (!record.clientId().equals(userId)) {
-			throw new NotificationEventAccessDeniedException(
-					"The notification event does not belong to the requesting user");
+			throw new NotificationEventAccessDeniedException(notificationEventId, userId);
 		}
 
 		// delivery_status is the durable source of truth for "already handled":
@@ -62,12 +64,19 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 			return new DeliveryResult(event.eventId(), DeliveryStatus.NOT_SUBSCRIBED, null);
 		}
 
+		// A manual replay is a deliberate, one-off retry: it always attempts
+		// delivery regardless of the webhook's circuit breaker state, so it can
+		// still recover an event even while the automatic flow is short-circuiting
+		// that webhook. Its outcome still feeds the score, so a run of successful
+		// replays can close the circuit again.
 		DeliveryResult result;
 		try {
 			result = notificationProviderPort.deliver(event, webHookUrl.get());
 			idempotencyPort.markAsProcessed(event);
+			webhookCircuitBreakerPort.recordResult(event.clientId(), event.eventType(), true);
 		} catch (NotificationDeliveryException e) {
 			result = new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null);
+			webhookCircuitBreakerPort.recordResult(event.clientId(), event.eventType(), false);
 		}
 		notificationRecordPort.save(event, result);
 		return result;

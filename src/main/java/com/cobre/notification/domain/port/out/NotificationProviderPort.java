@@ -11,9 +11,8 @@ public interface NotificationProviderPort {
 	 * webhook URL to call.
 	 *
 	 * @throws NotificationDeliveryException when the provider rejects the event,
-	 *                                        stays unavailable after the retry
-	 *                                        strategy is exhausted, or the circuit
-	 *                                        breaker is open.
+	 *                                        or stays unavailable after the retry
+	 *                                        strategy is exhausted.
 	 */
 	DeliveryResult deliver(NotificationEvent event, String webHookUrl);
 }

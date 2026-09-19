@@ -10,8 +10,6 @@ import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.out.NotificationProviderPort;
 
-import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
-
 @Component
 public class NotificationProviderHttpAdapter implements NotificationProviderPort {
 
@@ -26,11 +24,6 @@ public class NotificationProviderHttpAdapter implements NotificationProviderPort
 		try {
 			ProviderNotificationResponse response = httpClient.send(toProviderRequest(event, webHookUrl));
 			return new DeliveryResult(event.eventId(), DeliveryStatus.DELIVERED, response.reference());
-		} catch (CallNotPermittedException e) {
-			throw new NotificationDeliveryException(
-					"Notification provider circuit breaker is open, delivery for event "
-							+ event.eventId() + " was short-circuited",
-					e);
 		} catch (NotificationProviderRejectedException | NotificationProviderTransientException e) {
 			throw new NotificationDeliveryException(
 					"Delivery failed for event " + event.eventId() + ": " + e.getMessage(), e);

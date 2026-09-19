@@ -27,6 +27,7 @@ import com.cobre.notification.domain.port.out.NotificationEventQueryPort;
 import com.cobre.notification.domain.port.out.NotificationProviderPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
+import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
 
 @ExtendWith(MockitoExtension.class)
 class NotificationEventReplayServiceTest {
@@ -49,6 +50,9 @@ class NotificationEventReplayServiceTest {
 	@Mock
 	private IdempotencyPort idempotencyPort;
 
+	@Mock
+	private WebhookCircuitBreakerPort webhookCircuitBreakerPort;
+
 	@Test
 	void redeliversAFailedEventAndRecordsTheNewResult() {
 		NotificationEventReplayService service = newService();
@@ -63,6 +67,24 @@ class NotificationEventReplayServiceTest {
 		assertThat(result).isEqualTo(expected);
 		verify(idempotencyPort).markAsProcessed(any());
 		verify(notificationRecordPort).save(any(), any());
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", true);
+	}
+
+	@Test
+	void attemptsDeliveryEvenWhenTheWebhookCircuitBreakerWouldOtherwiseBlockIt() {
+		NotificationEventReplayService service = newService();
+		NotificationEventRecord record = aRecord(DeliveryStatus.FAILED, null);
+		given(queryPort.findById(NOTIFICATION_EVENT_ID)).willReturn(Optional.of(record));
+		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment")).willReturn(Optional.of(WEBHOOK_URL));
+		DeliveryResult expected = new DeliveryResult("EVT001", DeliveryStatus.DELIVERED, "ref-new");
+		given(notificationProviderPort.deliver(any(), any())).willReturn(expected);
+
+		DeliveryResult result = service.replay(NOTIFICATION_EVENT_ID, "CLIENT001");
+
+		assertThat(result).isEqualTo(expected);
+		verify(notificationProviderPort).deliver(any(), any());
+		verify(webhookCircuitBreakerPort, never()).isCallPermitted(any(), any());
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", true);
 	}
 
 	@Test
@@ -91,6 +113,7 @@ class NotificationEventReplayServiceTest {
 		assertThat(result).isEqualTo(new DeliveryResult("EVT001", DeliveryStatus.FAILED, null));
 		verify(idempotencyPort, never()).markAsProcessed(any());
 		verify(notificationRecordPort).save(any(), any());
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", false);
 	}
 
 	@Test
@@ -115,7 +138,7 @@ class NotificationEventReplayServiceTest {
 
 	private NotificationEventReplayService newService() {
 		return new NotificationEventReplayService(queryPort, subscriptionPort, notificationProviderPort,
-				notificationRecordPort, idempotencyPort);
+				notificationRecordPort, idempotencyPort, webhookCircuitBreakerPort);
 	}
 
 	private static NotificationEventRecord aRecord(DeliveryStatus status, String providerReference) {
