@@ -18,7 +18,6 @@ import com.cobre.notification.domain.port.out.NotificationEventQueryPort;
 import com.cobre.notification.domain.port.out.NotificationProviderPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
-import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
 
 @Service
 public class NotificationEventReplayService implements ReplayNotificationEventUseCase {
@@ -28,17 +27,15 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 	private final NotificationProviderPort notificationProviderPort;
 	private final NotificationRecordPort notificationRecordPort;
 	private final IdempotencyPort idempotencyPort;
-	private final WebhookCircuitBreakerPort webhookCircuitBreakerPort;
 
 	public NotificationEventReplayService(NotificationEventQueryPort queryPort, SubscriptionPort subscriptionPort,
 			NotificationProviderPort notificationProviderPort, NotificationRecordPort notificationRecordPort,
-			IdempotencyPort idempotencyPort, WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
+			IdempotencyPort idempotencyPort) {
 		this.queryPort = queryPort;
 		this.subscriptionPort = subscriptionPort;
 		this.notificationProviderPort = notificationProviderPort;
 		this.notificationRecordPort = notificationRecordPort;
 		this.idempotencyPort = idempotencyPort;
-		this.webhookCircuitBreakerPort = webhookCircuitBreakerPort;
 	}
 
 	@Override
@@ -65,18 +62,18 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 		}
 
 		// A manual replay is a deliberate, one-off retry: it always attempts
-		// delivery regardless of the webhook's circuit breaker state, so it can
-		// still recover an event even while the automatic flow is short-circuiting
-		// that webhook. Its outcome still feeds the score, so a run of successful
-		// replays can close the circuit again.
+		// delivery regardless of the webhook's circuit breaker state (the
+		// outbound adapter never consults isCallPermitted from here), so it can
+		// still recover an event even while the automatic flow is
+		// short-circuiting that webhook. Its outcome still feeds the score —
+		// see NotificationProviderHttpClient — so a run of successful replays
+		// can close the circuit again.
 		DeliveryResult result;
 		try {
 			result = notificationProviderPort.deliver(event, webHookUrl.get());
 			idempotencyPort.markAsProcessed(event);
-			webhookCircuitBreakerPort.recordResult(event.clientId(), event.eventType(), true);
 		} catch (NotificationDeliveryException e) {
 			result = new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null);
-			webhookCircuitBreakerPort.recordResult(event.clientId(), event.eventType(), false);
 		}
 		notificationRecordPort.save(event, result);
 		return result;

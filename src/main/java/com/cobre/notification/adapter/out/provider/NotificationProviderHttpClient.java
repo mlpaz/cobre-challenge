@@ -15,6 +15,7 @@ import com.cobre.notification.adapter.out.provider.config.NotificationProviderPr
 import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationRequest;
 import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationResponse;
 import com.cobre.notification.domain.port.out.MetricsPort;
+import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
 
 import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.retry.Retry;
@@ -32,7 +33,11 @@ import io.github.resilience4j.retry.RetryConfig;
  * Provider is shared by every client, so a provider-wide breaker would let
  * one client's consistently-failing webhook trip the circuit for everybody
  * else's healthy webhooks too. That protection instead lives per webhook —
- * see {@link com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort}.
+ * see {@link WebhookCircuitBreakerPort} — and is fed from here, once per
+ * actual HTTP attempt (including every internal retry), rather than once per
+ * {@link #send} call: a delivery that fails twice before succeeding on retry
+ * still counts as two failures and a success against that webhook's score,
+ * not a single success.
  */
 public class NotificationProviderHttpClient {
 
@@ -42,9 +47,11 @@ public class NotificationProviderHttpClient {
 	private final String path;
 	private final Retry retry;
 	private final MetricsPort metricsPort;
+	private final WebhookCircuitBreakerPort webhookCircuitBreakerPort;
 
-	public NotificationProviderHttpClient(NotificationProviderProperties properties, MetricsPort metricsPort) {
-		this(buildRestClient(properties), properties, metricsPort);
+	public NotificationProviderHttpClient(NotificationProviderProperties properties, MetricsPort metricsPort,
+			WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
+		this(buildRestClient(properties), properties, metricsPort, webhookCircuitBreakerPort);
 	}
 
 	/**
@@ -52,11 +59,12 @@ public class NotificationProviderHttpClient {
 	 * server while still exercising the real retry behavior.
 	 */
 	NotificationProviderHttpClient(RestClient restClient, NotificationProviderProperties properties,
-			MetricsPort metricsPort) {
+			MetricsPort metricsPort, WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
 		this.path = properties.path();
 		this.restClient = restClient;
 		this.retry = buildRetry(properties.retry());
 		this.metricsPort = metricsPort;
+		this.webhookCircuitBreakerPort = webhookCircuitBreakerPort;
 	}
 
 	public ProviderNotificationResponse send(ProviderNotificationRequest request) {
@@ -72,21 +80,25 @@ public class NotificationProviderHttpClient {
 					.retrieve()
 					.toEntity(ProviderNotificationResponse.class);
 			recordWebhookResponse(request, String.valueOf(response.getStatusCode().value()));
+			recordCircuitBreakerResult(request, true);
 			log.debug("Notification provider responded {} for event {}", response.getStatusCode().value(),
 					request.eventId());
 			return response.getBody();
 		} catch (HttpClientErrorException e) {
 			recordWebhookResponse(request, String.valueOf(e.getStatusCode().value()));
+			recordCircuitBreakerResult(request, false);
 			log.warn("Notification provider rejected event {}: {}", request.eventId(), e.getStatusCode());
 			throw new NotificationProviderRejectedException(
 					"Notification provider rejected event " + request.eventId() + ": " + e.getStatusCode(), e);
 		} catch (HttpServerErrorException e) {
 			recordWebhookResponse(request, String.valueOf(e.getStatusCode().value()));
+			recordCircuitBreakerResult(request, false);
 			log.warn("Notification provider unavailable (status {}) for event {}", e.getStatusCode(),
 					request.eventId());
 			throw transientException(request, e);
 		} catch (ResourceAccessException e) {
 			recordWebhookResponse(request, "timeout");
+			recordCircuitBreakerResult(request, false);
 			log.warn("Notification provider unreachable for event {}: {}", request.eventId(), e.getMessage());
 			throw transientException(request, e);
 		}
@@ -96,6 +108,10 @@ public class NotificationProviderHttpClient {
 		metricsPort.increment("notification.webhook.response", "status_code:" + statusCode,
 				"event_type:" + request.eventType(), "client_id:" + request.clientId(),
 				"webhook:" + request.webHookUrl());
+	}
+
+	private void recordCircuitBreakerResult(ProviderNotificationRequest request, boolean success) {
+		webhookCircuitBreakerPort.recordResult(request.clientId(), request.eventType(), success);
 	}
 
 	private static NotificationProviderTransientException transientException(ProviderNotificationRequest request,

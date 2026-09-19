@@ -2,6 +2,7 @@ package com.cobre.notification.adapter.out.provider;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -24,6 +25,7 @@ import com.cobre.notification.adapter.out.provider.config.NotificationProviderPr
 import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationRequest;
 import com.cobre.notification.adapter.out.provider.dto.ProviderNotificationResponse;
 import com.cobre.notification.domain.port.out.MetricsPort;
+import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
 
 /**
  * Exercises the real retry behavior of the Notification Provider HTTP client
@@ -38,6 +40,7 @@ class NotificationProviderHttpClientTest {
 			"https://client.example.com/webhooks/notifications");
 
 	private final MetricsPort metricsPort = Mockito.mock(MetricsPort.class);
+	private final WebhookCircuitBreakerPort webhookCircuitBreakerPort = Mockito.mock(WebhookCircuitBreakerPort.class);
 
 	@Test
 	void succeedsOnTheFirstAttempt() {
@@ -48,7 +51,7 @@ class NotificationProviderHttpClientTest {
 				.andRespond(withSuccess("{\"reference\":\"ref-1\"}", MediaType.APPLICATION_JSON));
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10)), metricsPort);
+				properties(3, Duration.ofMillis(10)), metricsPort, webhookCircuitBreakerPort);
 
 		ProviderNotificationResponse response = client.send(request);
 
@@ -56,41 +59,49 @@ class NotificationProviderHttpClientTest {
 		server.verify();
 		verify(metricsPort).increment("notification.webhook.response", "status_code:200",
 				"event_type:credit_card_payment", "client_id:CLIENT001", "webhook:" + request.webHookUrl());
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", true);
 	}
 
 	@Test
-	void doesNotRetryOnAClientError() {
+	void doesNotRetryOnAClientErrorButStillRecordsItAsAFailure() {
 		RestClient.Builder builder = RestClient.builder().baseUrl("http://notification-provider.local");
 		MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
 		server.expect(requestTo(URL)).andRespond(withStatus(HttpStatus.BAD_REQUEST));
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10)), metricsPort);
+				properties(3, Duration.ofMillis(10)), metricsPort, webhookCircuitBreakerPort);
 
 		assertThatThrownBy(() -> client.send(request)).isInstanceOf(NotificationProviderRejectedException.class);
 		server.verify();
 		verify(metricsPort).increment("notification.webhook.response", "status_code:400",
 				"event_type:credit_card_payment", "client_id:CLIENT001", "webhook:" + request.webHookUrl());
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", false);
 	}
 
 	@Test
-	void retriesTransientFailuresUntilItSucceeds() {
+	void everyAttemptCountsTowardsTheScoreIncludingTheOnesRetriedInternally() {
+		// This is the whole point of recording per HTTP attempt instead of once
+		// per send() call: a delivery that fails once and then succeeds on retry
+		// must show up as one failure AND one success against the webhook's
+		// score, not get collapsed into a single success.
 		RestClient.Builder builder = RestClient.builder().baseUrl("http://notification-provider.local");
 		MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
 		server.expect(requestTo(URL)).andRespond(withServerError());
 		server.expect(requestTo(URL)).andRespond(withSuccess("{\"reference\":\"ref-2\"}", MediaType.APPLICATION_JSON));
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10)), metricsPort);
+				properties(3, Duration.ofMillis(10)), metricsPort, webhookCircuitBreakerPort);
 
 		ProviderNotificationResponse response = client.send(request);
 
 		assertThat(response).isEqualTo(new ProviderNotificationResponse("ref-2"));
 		server.verify();
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", false);
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", true);
 	}
 
 	@Test
-	void exhaustsRetriesAndFailsWithATransientException() {
+	void exhaustsRetriesAndFailsWithATransientExceptionRecordingEveryAttempt() {
 		RestClient.Builder builder = RestClient.builder().baseUrl("http://notification-provider.local");
 		MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
 		for (int i = 0; i < 3; i++) {
@@ -98,10 +109,11 @@ class NotificationProviderHttpClientTest {
 		}
 
 		NotificationProviderHttpClient client = new NotificationProviderHttpClient(builder.build(),
-				properties(3, Duration.ofMillis(10)), metricsPort);
+				properties(3, Duration.ofMillis(10)), metricsPort, webhookCircuitBreakerPort);
 
 		assertThatThrownBy(() -> client.send(request)).isInstanceOf(NotificationProviderTransientException.class);
 		server.verify();
+		verify(webhookCircuitBreakerPort, times(3)).recordResult("CLIENT001", "credit_card_payment", false);
 	}
 
 	private static NotificationProviderProperties properties(int maxAttempts, Duration waitDuration) {

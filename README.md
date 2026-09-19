@@ -90,7 +90,7 @@ Es una caché en memoria de una sola instancia — no es la fuente de verdad. El
 
 ### Retry
 
-`NotificationProviderHttpClient` envuelve cada llamada al Notification Provider con retry (Resilience4j), para absorber fallas transitorias (5xx, timeout, error de conexión) sin intervención manual. Un rechazo 4xx **no** se reintenta.
+`NotificationProviderHttpClient` envuelve cada llamada al Notification Provider con retry (Resilience4j), para absorber fallas transitorias (5xx, timeout, error de conexión) sin intervención manual. Un rechazo 4xx **no** se reintenta. Cada intento — el original y cada reintento — se registra por separado contra el [score del webhook](#score-y-circuit-breaker-por-webhook), no solo el resultado final.
 
 | Property | Qué configura |
 |---|---|
@@ -109,7 +109,9 @@ Un evento cuya entrega falla definitivamente (reintentos agotados, o circuit bre
 
 `POST /subscriptions` registra, para el cliente indicado en el header `x-user-id`, la URL de webhook a la que quiere recibir las notificaciones de un tipo de evento (`SubscriptionService` → tabla `subscriptions`, única fila por `user_id + event_type`; volver a suscribirse con el mismo par actualiza la URL en vez de duplicar la fila). El `user_id` sale siempre del header, nunca del body — así no se puede suscribir en nombre de otro cliente solo con conocer su `user_id`.
 
-Cuando llega un evento de ese tipo para ese cliente, `NotificationDeliveryService` busca esa URL (`SubscriptionPort.findWebHookUrl`) y se la pasa al **Notification Provider** externo junto con el evento (`NotificationProviderHttpClient` → `POST` al provider, con el `webhook_url` como parte del payload). Es el Notification Provider quien efectivamente hace la llamada HTTPS al webhook del cliente — este servicio nunca le pega directo al webhook. La respuesta que el provider recibe de esa llamada (status code) es lo que determina si el evento queda `DELIVERED` o `FAILED`, y es también la señal que alimenta el circuit breaker de ese webhook (siguiente sección).
+Cuando llega un evento de ese tipo para ese cliente, `NotificationDeliveryService` busca esa URL (`SubscriptionPort.findWebHookUrl`) y se la pasa al **Notification Provider** externo junto con el evento (`NotificationProviderHttpClient` → `POST` al provider, con el `webhook_url` como parte del payload). Es el Notification Provider quien efectivamente hace la llamada HTTPS al webhook del cliente — este servicio nunca le pega directo al webhook. La respuesta que el provider recibe de esa llamada (status code) es lo que determina si el evento queda `DELIVERED` o `FAILED`.
+
+Esa misma respuesta alimenta el circuit breaker de ese webhook (siguiente sección) — y lo hace **por cada intento HTTP real**, no una sola vez por evento: si `NotificationProviderHttpClient` reintenta internamente (ver [Retry](#retry)) porque una respuesta fue transitoriamente mala, cada intento individual — el que falló y el que finalmente tuvo éxito — se registra por separado contra el score. Un evento que falla una vez y se recupera al reintentar cuenta como una falla **y** un éxito para ese webhook, no se colapsa en un solo resultado.
 
 ### Score y circuit breaker por webhook
 
@@ -119,8 +121,8 @@ El estado vive en la propia tabla `subscriptions`:
 
 | Columna | Qué es |
 |---|---|
-| `success_score` | Score 0-100: % de éxito reciente de ese webhook. Se recalcula en cada intento de entrega como un promedio ponderado (`score = score_anterior × (1 − α) + resultado × α`, con `resultado` = 100 si tuvo éxito o 0 si falló) — así los resultados recientes pesan más que el historial viejo, sin necesidad de guardar cada llamada individual. |
-| `total_calls` | Cantidad de intentos de entrega contabilizados para ese webhook. |
+| `success_score` | Score 0-100: % de éxito reciente de ese webhook. Se recalcula en cada **intento HTTP real** contra el Notification Provider — incluidos los reintentos internos de Resilience4j, cada uno por separado, no solo el resultado final de la entrega — como un promedio ponderado (`score = score_anterior × (1 − α) + resultado × α`, con `resultado` = 100 si tuvo éxito o 0 si falló). Así los resultados recientes pesan más que el historial viejo, sin necesidad de guardar cada llamada individual. |
+| `total_calls` | Cantidad de intentos HTTP contabilizados para ese webhook (uno por cada intento real, no por evento). |
 | `circuit_state` | `CLOSED` (sano, entrega normal), `OPEN` (bloqueado, no se llama al provider) o `HALF_OPEN` (probando de nuevo con cupo limitado). |
 | `circuit_opened_at` | Cuándo se abrió el circuito por última vez (usado para saber cuándo pasar a `HALF_OPEN`). |
 | `half_open_calls` | Cuántas llamadas de prueba ya se dejaron pasar en el estado `HALF_OPEN`. |

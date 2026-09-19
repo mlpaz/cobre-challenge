@@ -77,9 +77,12 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 			result = new DeliveryResult(event.eventId(), DeliveryStatus.CIRCUIT_OPEN, null);
 		} else {
 			try {
+				// The outbound adapter itself feeds each HTTP attempt's outcome
+				// (including internal retries) into the webhook's circuit breaker
+				// score — see NotificationProviderHttpClient — so nothing more to
+				// record here.
 				result = notificationProviderPort.deliver(event, webHookUrl.get());
 				idempotencyPort.markAsProcessed(event);
-				webhookCircuitBreakerPort.recordResult(event.clientId(), event.eventType(), true);
 			} catch (NotificationDeliveryException e) {
 				// Delivery definitively failed (retries exhausted). We still answer
 				// normally: returning an error status here could make a caller (an
@@ -89,7 +92,6 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 				// deliberately later via the self-service API.
 				log.warn("Delivery failed for event {}: {}", event.eventId(), e.getMessage());
 				result = new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null);
-				webhookCircuitBreakerPort.recordResult(event.clientId(), event.eventType(), false);
 			}
 		}
 		notificationRecordPort.save(event, result);

@@ -65,7 +65,10 @@ class NotificationDeliveryServiceTest {
 		verify(notificationProviderPort).deliver(event, WEBHOOK_URL);
 		verify(idempotencyPort).markAsProcessed(event);
 		verify(notificationRecordPort).save(event, expected);
-		verify(webhookCircuitBreakerPort).recordResult(event.clientId(), event.eventType(), true);
+		// Recording the outcome against the webhook's circuit breaker score now
+		// happens per HTTP attempt inside NotificationProviderHttpClient (so
+		// internal retries each count), not once here after deliver() returns.
+		verify(webhookCircuitBreakerPort, never()).recordResult(any(), any(), anyBoolean());
 		verify(metricsPort).increment("notification.events.received", "event_type:credit_card_payment",
 				"client_id:CLIENT001");
 		verify(metricsPort).increment("notification.subscription.webhook_found", "event_type:credit_card_payment",
@@ -104,7 +107,7 @@ class NotificationDeliveryServiceTest {
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null));
 		verify(idempotencyPort, never()).markAsProcessed(any());
 		verify(notificationRecordPort).save(event, new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null));
-		verify(webhookCircuitBreakerPort).recordResult(event.clientId(), event.eventType(), false);
+		verify(webhookCircuitBreakerPort, never()).recordResult(any(), any(), anyBoolean());
 		verify(metricsPort).increment("notification.events.saved", "delivery_status:FAILED", "client_id:CLIENT001");
 	}
 
