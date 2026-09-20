@@ -152,6 +152,25 @@ class NotificationControllerTest {
 	}
 
 	@Test
+	void returnsBadRequestWhenTheEventTypeIsNotInTheKnownList() throws Exception {
+		String payload = """
+				{
+				  "event_id": "EVT001",
+				  "event_type": "banana_payment",
+				  "content": "Credit card payment received for $150.00",
+				  "delivery_date": "2024-03-15T09:30:22Z",
+				  "client_id": "CLIENT001"
+				}
+				""";
+
+		mockMvc.perform(post("/notification_events")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(payload))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.code").value("INVALID_EVENT_TYPE"));
+	}
+
+	@Test
 	void listsEventsForTheUserInTheHeader() throws Exception {
 		NotificationEventRecord record = new NotificationEventRecord(notificationEventId, "EVT001",
 				"credit_card_payment", "Payment received", "CLIENT001", Instant.parse("2024-03-15T09:30:22Z"),

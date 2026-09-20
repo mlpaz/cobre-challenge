@@ -12,27 +12,22 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.cobre.notification.AbstractPostgresIntegrationTest;
 import com.cobre.notification.adapter.out.subscription.config.WebhookCircuitBreakerProperties;
 import com.cobre.notification.domain.model.Subscription;
 import com.cobre.notification.domain.model.WebhookCircuitState;
 import com.cobre.notification.domain.port.out.MetricsPort;
 
 /**
- * Full context against H2 (PostgreSQL compatibility mode), same approach as
+ * Full context against a real PostgreSQL instance (see
+ * {@link AbstractPostgresIntegrationTest}), same approach as
  * SubscriptionJpaAdapterTest: Boot 4 dropped @DataJpaTest.
  */
 @SpringBootTest
-@TestPropertySource(properties = {
-		"spring.datasource.url=jdbc:h2:mem:webhook-circuit-breaker;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
-		"spring.datasource.driver-class-name=org.h2.Driver",
-		"spring.datasource.username=sa",
-		"spring.datasource.password="
-})
 @Transactional
-class WebhookCircuitBreakerJpaAdapterTest {
+class WebhookCircuitBreakerJpaAdapterTest extends AbstractPostgresIntegrationTest {
 
 	private static final String CLIENT_ID = "CLIENT001";
 	private static final String EVENT_TYPE = "credit_card_payment";

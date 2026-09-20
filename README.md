@@ -106,7 +106,7 @@ Un evento cuya entrega falla definitivamente (reintentos agotados, o circuit bre
 
 `POST /subscriptions` registra, para el cliente indicado en el header `x-user-id`, la URL de webhook a la que quiere recibir las notificaciones de un tipo de evento (`SubscriptionService` → tabla `subscriptions`, única fila por `user_id + event_type`; volver a suscribirse con el mismo par actualiza la URL en vez de duplicar la fila). El `user_id` sale siempre del header, nunca del body — así no se puede suscribir en nombre de otro cliente solo con conocer su `user_id`.
 
-Cuando llega un evento de ese tipo para ese cliente, `NotificationDeliveryService` busca esa URL (`SubscriptionPort.findWebHookUrl`) y `WebhookHttpClient` hace un `POST` HTTPS directo a esa URL con el evento como body — no hay ningún intermediario entre este servicio y el webhook del cliente. La respuesta de esa llamada (status code) es lo que determina si el evento queda `DELIVERED` o `FAILED`; el cuerpo de la respuesta se guarda (recortado a 1000 caracteres) como `webhook_response`.
+Cuando llega un evento de ese tipo para ese cliente, `NotificationDeliveryService` busca esa URL (`SubscriptionPort.findWebHookUrl`) y `WebhookHttpClient` hace un `POST` HTTPS directo a esa URL con el evento como body — no hay ningún intermediario entre este servicio y el webhook del cliente. La respuesta de esa llamada (status code) es lo que determina si el evento queda `DELIVERED` o `FAILED`; el cuerpo de la respuesta se guarda (recortado a 1000 caracteres) como `webhook_response` (ver [A10 en Seguridad](#seguridad) para el riesgo de SSRF que esta llamada directa introduce).
 
 Esa misma respuesta alimenta el circuit breaker de ese webhook (siguiente sección) — y lo hace **por cada intento HTTP real**, no una sola vez por evento: si `WebhookHttpClient` reintenta internamente (ver [Retry](#retry)) porque una respuesta fue transitoriamente mala, cada intento individual — el que falló y el que finalmente tuvo éxito — se registra por separado contra el score. Un evento que falla una vez y se recupera al reintentar cuenta como una falla **y** un éxito para ese webhook, no se colapsa en un solo resultado.
 
@@ -172,9 +172,11 @@ Reintenta la entrega de un evento puntual.
 
 ## Otros endpoints
 
+`event_type` está limitado a una lista fija — el enum `EventType` (`CREDIT_CARD_PAYMENT`, `DEBIT_CARD_WITHDRAWAL`, `CREDIT_TRANSFER`, `DEBIT_AUTOMATIC_PAYMENT`, `CREDIT_REFUND`, `DEBIT_TRANSFER`, `CREDIT_DEPOSIT`, `DEBIT_PURCHASE`, `CREDIT_CASHBACK`, `DEBIT_SUBSCRIPTION`, tomados de los datos de ejemplo del caso), comparado sin distinguir mayúsculas/minúsculas. La validación vive en el constructor de `NotificationEvent` (dominio), no en el controller — así aplica igual sin importar si el evento entra por `POST /notification_events`, por Kafka o al reconstruirse en un `replay`. Un `event_type` fuera de esa lista devuelve `400` (`INVALID_EVENT_TYPE`) por HTTP, o queda para el error handler del listener (reintentos acotados) si entra por Kafka. `event_type` en `/subscriptions` **no** tiene esta restricción — un cliente puede suscribirse a un tipo antes de que exista tráfico real de ese tipo.
+
 | Método | Path | Descripción |
 |---|---|---|
-| `POST` | `/notification_events` | Ingesta manual de un evento (mismo caso de uso que consume el Kafka listener). Body: `event_id`, `event_type`, `content`, `delivery_date`, `client_id`. |
+| `POST` | `/notification_events` | Ingesta manual de un evento (mismo caso de uso que consume el Kafka listener). Body: `event_id`, `event_type`, `content`, `delivery_date`, `client_id`. `400` (`INVALID_EVENT_TYPE`) si `event_type` no está en la lista soportada. |
 | `POST` | `/subscriptions` | Crea o actualiza el webhook del cliente indicado en `x-user-id` para un tipo de evento. Body: `event_type`, `web_hook_url`. |
 | `GET` | `/subscriptions` | Lista las suscripciones del cliente indicado en `x-user-id` (una fila por `event_type`). |
 | `PUT` | `/subscriptions/{event_type}` | Actualiza el webhook de una suscripción existente del cliente en `x-user-id`. A diferencia del `POST`, no crea una suscripción nueva: `404` (`SUBSCRIPTION_NOT_FOUND`) si no existía. |
@@ -236,9 +238,9 @@ El [rate limiting](#rate-limiting) es por IP — no hay autenticación (ver A01/
 
 `WebhookHttpClient` hace un `POST` HTTPS server-side directo a la URL exacta que el cliente registró en `POST /subscriptions` (`web_hook_url`), sin validar el destino más allá del formato (`@URL`, ver A02). Nada impide registrar una URL que apunte a infraestructura interna — metadata del cloud (`http://169.254.169.254/...`), servicios en `localhost` o en la VPC — el servicio la llamaría igual.
 
-**Impacto**: un cliente puede usar este servicio como proxy para alcanzar recursos internos que de otra forma no serían accesibles desde afuera (metadata de la nube, servicios internos sin autenticación propia).
+**Impacto**: esto no es un SSRF ciego — es exfiltración de datos internos a través de la propia API pública. `WebhookHttpAdapter` guarda la respuesta cruda de esa URL (`webhook_response`, hasta 1000 caracteres) y la devuelve tal cual en la respuesta de `POST /notification_events` / `POST .../replay`, y queda consultable después por `GET /notification_events/{id}`. Un cliente puede registrar como webhook la URL de metadata de credenciales de la instancia cloud (o cualquier endpoint interno sin autenticación propia), disparar un evento, y leer la respuesta completa de ese recurso interno en `webhook_response` — no solo confirmar que existe, sino **leer su contenido** desde afuera.
 
-**Propuesta de mitigación**: en el mismo `ConstraintValidator` de A02 (o en un chequeo previo a cada intento de entrega, no solo al suscribirse — por DNS rebinding), resolver el host y rechazar IPs privadas/loopback/link-local (RFC 1918, `127.0.0.0/8`, `169.254.0.0/16`, etc.).
+**Propuesta de mitigación**: en el mismo `ConstraintValidator` de A02 (o en un chequeo previo a cada intento de entrega, no solo al suscribirse — por DNS rebinding), resolver el host y rechazar IPs privadas/loopback/link-local (RFC 1918, `127.0.0.0/8`, `169.254.0.0/16`, etc.); deshabilitar el seguimiento automático de redirects en el `RestClient` (o re-validar el destino en cada redirect) para que un 3xx no sea una forma de esquivar el chequeo inicial.
 
 ## Rate limiting
 
@@ -256,7 +258,7 @@ Dos niveles, cada uno con su propio balde (no comparten cupo):
 | `rate-limit.general.capacity` | Máximo de requests en ráfaga por IP para el nivel general. |
 | `rate-limit.general.refill-tokens` | Cuántos tokens se recargan cada `refill-period`. |
 | `rate-limit.general.refill-period` | Ventana de tiempo de la recarga (junto con `refill-tokens` da el rate sostenido, ej. 60/60/1m = 60 req/min). |
-| `rate-limit.strict.capacity` | Igual que `general.capacity`, pero para `POST /subscriptions` y el replay. |
+| `rate-limit.strict.capacity` | Igual que `general.capacity`, pero para `POST`/`PUT`/`DELETE` de `/subscriptions` y el replay. |
 | `rate-limit.strict.refill-tokens` | Igual que `general.refill-tokens`, para el nivel estricto. |
 | `rate-limit.strict.refill-period` | Igual que `general.refill-period`, para el nivel estricto. |
 
@@ -268,3 +270,13 @@ La API REST se documenta automáticamente con **SpringDoc OpenAPI** (`springdoc-
 
 - Spec en JSON: `GET /v3/api-docs`
 - UI interactiva (Swagger UI): `GET /swagger-ui.html` (sirve `/swagger-ui/index.html`)
+
+## Tests
+
+```bash
+./gradlew test
+```
+
+**Necesita Docker corriendo.** Todos los tests con contexto Spring (`@SpringBootTest`) corren contra un **PostgreSQL real** (`org.testcontainers:postgresql`), no contra H2 — el proyecto no usa H2 en ningún lado. La razón: H2, incluso en modo compatibilidad PostgreSQL, no replica cómo PostgreSQL infiere el tipo de un parámetro al preparar una sentencia server-side. Un parámetro que solo aparece del lado del `IS NULL` en un `OR` (como `:status`/`:from`/`:to` en `NotificationEventJpaRepository#search` cuando esos filtros no vienen) no tiene de dónde sacar el tipo, y Postgres rechaza la query (`could not determine data type of parameter $n`) — un bug real que un test contra H2 nunca hubiera detectado. La consulta usa `CAST(... AS ...)` explícito en cada placeholder para evitarlo.
+
+El contenedor se levanta **una sola vez por corrida completa**, no uno por clase: `AbstractPostgresIntegrationTest` lo arranca en un bloque estático (`static { POSTGRES.start(); }`) y lo expone vía `@ServiceConnection`; como es un campo `static` de esa superclase, todas las clases de test que la extienden comparten el mismo contenedor ya corriendo — Testcontainers no lo reinicia por clase. El reaper de Testcontainers (Ryuk) lo apaga solo al terminar la JVM.

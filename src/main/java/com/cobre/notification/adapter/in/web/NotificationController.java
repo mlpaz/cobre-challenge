@@ -58,7 +58,7 @@ public class NotificationController {
 	@Operation(summary = "Ingesta un evento de notificación",
 			description = "Mismo caso de uso que consume el listener de Kafka; pensado para pruebas manuales o integraciones que no pasan por el broker.")
 	@ApiResponse(responseCode = "200", description = "Resultado del intento de entrega")
-	@ApiResponse(responseCode = "400", description = "Request inválido")
+	@ApiResponse(responseCode = "400", description = "Request inválido, o event_type fuera de la lista de tipos soportados")
 	@PostMapping
 	public ResponseEntity<NotificationEventResponse> receive(@Valid @RequestBody NotificationEventRequest request) {
 		DeliveryResult result = sendNotificationUseCase.sendNotification(NotificationEventWebMapper.toDomain(request));

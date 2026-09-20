@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import com.cobre.notification.adapter.in.web.dto.ErrorResponse;
+import com.cobre.notification.domain.exception.InvalidEventTypeException;
 import com.cobre.notification.domain.exception.InvalidPaginationException;
 import com.cobre.notification.domain.exception.NotificationEventAccessDeniedException;
 import com.cobre.notification.domain.exception.NotificationEventNotFoundException;
@@ -56,6 +57,12 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ErrorResponse> handleInvalidPagination(InvalidPaginationException ex) {
 		return ResponseEntity.status(HttpStatus.BAD_REQUEST)
 				.body(new ErrorResponse("INVALID_PAGINATION", ex.getMessage()));
+	}
+
+	@ExceptionHandler(InvalidEventTypeException.class)
+	public ResponseEntity<ErrorResponse> handleInvalidEventType(InvalidEventTypeException ex) {
+		return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+				.body(new ErrorResponse("INVALID_EVENT_TYPE", ex.getMessage()));
 	}
 
 	@ExceptionHandler(NotificationEventAccessDeniedException.class)

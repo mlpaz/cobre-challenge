@@ -16,9 +16,9 @@ public interface NotificationEventJpaRepository extends JpaRepository<Notificati
 	@Query(value = """
 			SELECT * FROM notification_events e
 			WHERE e.client_id = :clientId
-			AND (:status IS NULL OR e.delivery_status = :status)
-			AND (:from IS NULL OR e.event_delivery_date >= :from)
-			AND (:to IS NULL OR e.event_delivery_date <= :to)
+			AND (CAST(:status AS varchar) IS NULL OR e.delivery_status = CAST(:status AS varchar))
+			AND (CAST(:from AS timestamp with time zone) IS NULL OR e.event_delivery_date >= CAST(:from AS timestamp with time zone))
+			AND (CAST(:to AS timestamp with time zone) IS NULL OR e.event_delivery_date <= CAST(:to AS timestamp with time zone))
 			ORDER BY e.event_delivery_date DESC
 			LIMIT :limit OFFSET :offset
 			""", nativeQuery = true)
@@ -29,9 +29,9 @@ public interface NotificationEventJpaRepository extends JpaRepository<Notificati
 	@Query(value = """
 			SELECT COUNT(*) FROM notification_events e
 			WHERE e.client_id = :clientId
-			AND (:status IS NULL OR e.delivery_status = :status)
-			AND (:from IS NULL OR e.event_delivery_date >= :from)
-			AND (:to IS NULL OR e.event_delivery_date <= :to)
+			AND (CAST(:status AS varchar) IS NULL OR e.delivery_status = CAST(:status AS varchar))
+			AND (CAST(:from AS timestamp with time zone) IS NULL OR e.event_delivery_date >= CAST(:from AS timestamp with time zone))
+			AND (CAST(:to AS timestamp with time zone) IS NULL OR e.event_delivery_date <= CAST(:to AS timestamp with time zone))
 			""", nativeQuery = true)
 	long countSearch(@Param("clientId") String clientId, @Param("status") String status, @Param("from") Instant from,
 			@Param("to") Instant to);

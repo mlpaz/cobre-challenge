@@ -12,6 +12,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.cobre.notification.domain.exception.InvalidEventTypeException;
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
@@ -68,6 +69,23 @@ class NotificationEventKafkaListenerTest {
 
 		assertThatThrownBy(() -> listener.onMessage(record("not-json")))
 				.isInstanceOf(RuntimeException.class);
+	}
+
+	@Test
+	void propagatesOnAnUnknownEventTypeSoTheContainerErrorHandlerCanRetryIt() {
+		String payloadWithUnknownEventType = """
+				{
+				  "event_id": "EVT001",
+				  "event_type": "banana_payment",
+				  "content": "Credit card payment received for $150.00",
+				  "delivery_date": "2024-03-15T09:30:22Z",
+				  "client_id": "CLIENT001"
+				}
+				""";
+		NotificationEventKafkaListener listener = new NotificationEventKafkaListener(sendNotificationUseCase, jsonMapper);
+
+		assertThatThrownBy(() -> listener.onMessage(record(payloadWithUnknownEventType)))
+				.isInstanceOf(InvalidEventTypeException.class);
 	}
 
 	private static ConsumerRecord<String, String> record(String payload) {

@@ -9,10 +9,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
+
+import com.cobre.notification.AbstractPostgresIntegrationTest;
 
 /**
  * Proves SpringDoc actually generates a working OpenAPI document against this
@@ -20,16 +21,12 @@ import org.springframework.web.context.WebApplicationContext;
  * with the dependency on the classpath. Boot 4's spring-boot-test-autoconfigure
  * dropped {@code @AutoConfigureMockMvc} (same gap noted in
  * NotificationRecordJpaAdapterTest for @DataJpaTest), so MockMvc is built
- * directly from the real WebApplicationContext instead.
+ * directly from the real WebApplicationContext instead. Runs against a real
+ * PostgreSQL instance (see {@link AbstractPostgresIntegrationTest}) since
+ * the context needs a working datasource to start at all.
  */
 @SpringBootTest
-@TestPropertySource(properties = {
-		"spring.datasource.url=jdbc:h2:mem:notification-openapi;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
-		"spring.datasource.driver-class-name=org.h2.Driver",
-		"spring.datasource.username=sa",
-		"spring.datasource.password="
-})
-class OpenApiDocumentationTest {
+class OpenApiDocumentationTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired
 	private WebApplicationContext webApplicationContext;

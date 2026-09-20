@@ -9,9 +9,9 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.cobre.notification.AbstractPostgresIntegrationTest;
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
@@ -20,20 +20,18 @@ import com.cobre.notification.domain.model.NotificationEventRecord;
 import com.cobre.notification.domain.model.PagedResult;
 
 /**
- * Full context against an H2 database (PostgreSQL compatibility mode), same
- * approach as {@link NotificationRecordJpaAdapterTest}: Boot 4 dropped the
- * {@code @DataJpaTest} slice, and the native LIMIT/OFFSET query needs a real
- * SQL dialect to exercise.
+ * Full context against a real PostgreSQL instance (see
+ * {@link AbstractPostgresIntegrationTest}), same approach as
+ * {@link NotificationRecordJpaAdapterTest}: Boot 4 dropped the
+ * {@code @DataJpaTest} slice, and the native queries in
+ * {@link NotificationEventJpaRepository} need real PostgreSQL semantics to
+ * exercise properly (see {@link #appliesLimitAndOffset()}, which is also the
+ * regression test for the "could not determine data type of parameter"
+ * native-query bug — H2 never reproduced it).
  */
 @SpringBootTest
-@TestPropertySource(properties = {
-		"spring.datasource.url=jdbc:h2:mem:notification-query;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
-		"spring.datasource.driver-class-name=org.h2.Driver",
-		"spring.datasource.username=sa",
-		"spring.datasource.password="
-})
 @Transactional
-class NotificationEventQueryJpaAdapterTest {
+class NotificationEventQueryJpaAdapterTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired
 	private NotificationEventQueryJpaAdapter adapter;

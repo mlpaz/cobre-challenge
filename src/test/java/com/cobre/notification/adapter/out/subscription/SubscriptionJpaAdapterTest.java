@@ -7,25 +7,20 @@ import java.time.Instant;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.cobre.notification.AbstractPostgresIntegrationTest;
 import com.cobre.notification.domain.model.Subscription;
 import com.cobre.notification.domain.model.WebhookCircuitState;
 
 /**
- * Full context against H2 (PostgreSQL compatibility mode), same approach as
+ * Full context against a real PostgreSQL instance (see
+ * {@link AbstractPostgresIntegrationTest}), same approach as
  * NotificationRecordJpaAdapterTest: Boot 4 dropped @DataJpaTest.
  */
 @SpringBootTest
-@TestPropertySource(properties = {
-		"spring.datasource.url=jdbc:h2:mem:subscriptions;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
-		"spring.datasource.driver-class-name=org.h2.Driver",
-		"spring.datasource.username=sa",
-		"spring.datasource.password="
-})
 @Transactional
-class SubscriptionJpaAdapterTest {
+class SubscriptionJpaAdapterTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired
 	private SubscriptionJpaAdapter adapter;
