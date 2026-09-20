@@ -88,7 +88,8 @@ class NotificationEventQueryJpaAdapterTest extends AbstractPostgresIntegrationTe
 			String webhookResponse) {
 		NotificationEvent event = new NotificationEvent(eventId, "credit_card_payment", "Payment received",
 				deliveryDate, clientId);
-		recordAdapter.save(event, new DeliveryResult(eventId, status, webhookResponse));
+		recordAdapter.tryClaim(event);
+		recordAdapter.complete(event, new DeliveryResult(eventId, status, webhookResponse));
 	}
 
 	private UUID idOf(String clientId, String eventId) {

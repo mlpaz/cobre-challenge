@@ -24,7 +24,6 @@ flowchart LR
         Listener["Kafka Listener"]
         API["REST API"]
         Core["Domain services<br/>(delivery, replay, query, subscription)"]
-        Idem[("Idempotency cache<br/>in-memory, TTL 1h")]
     end
 
     DB[("PostgreSQL<br/>notification_events / subscriptions")]
@@ -36,7 +35,6 @@ flowchart LR
     HTTPClients -->|HTTP| API
     Listener --> Core
     API --> Core
-    Core <--> Idem
     Core <--> DB
     Core -->|POST directo, con retry| WebhookA
     Core -->|POST directo, con retry| WebhookB
@@ -44,8 +42,7 @@ flowchart LR
 ```
 
 - **Kafka**: fuente principal de eventos (`notification.events.topic`). El listener y el endpoint `POST /notification_events` alimentan el mismo caso de uso.
-- **PostgreSQL**: `notification_events` (resultado final de cada evento procesado, una fila por `client_id + event_id`) y `subscriptions` (webhook activo por `user_id + event_type`, **más el score y el estado del circuit breaker de ese webhook** — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)).
-- **Idempotency cache**: mapa en memoria (`InMemoryIdempotencyStore`), clave = `event_id`, TTL configurable. Evita reentregar un evento ya delivered dentro de la ventana; el estado durable de "ya entregado" vive en la DB (`delivery_status`), no acá (más detalle en [Idempotencia y resiliencia](#idempotencia-y-resiliencia)).
+- **PostgreSQL**: `notification_events` (resultado final de cada evento procesado, una fila por `client_id + event_id` — también la pieza que hace atómica la deduplicación y el control de concurrencia, ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)) y `subscriptions` (webhook activo por `user_id + event_type`, **más el score y el estado del circuit breaker de ese webhook** — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)).
 - **Webhook del cliente**: el servicio le pega directo por HTTPS (con retry, `WebhookHttpClient`) — no hay ningún intermediario. El circuit breaker vive por webhook, en la tabla `subscriptions` (ver [Suscripciones y webhooks](#suscripciones-y-webhooks)), así el webhook roto de un cliente no bloquea la entrega a los demás.
 
 ## Flujo principal
@@ -63,28 +60,24 @@ sequenceDiagram
     Origen->>UseCase: evento
     UseCase->>Repo: busca webhook suscripto (client_id + event_type)
     Repo-->>UseCase: webhook URL
+    UseCase->>Repo: tryClaim(evento) — atómico, ver Concurrencia
+    Repo-->>UseCase: claim ganado
     UseCase->>Delivery: deliver(event, webhookUrl)
     Delivery->>Webhook: POST directo al webhook
     Webhook-->>Delivery: respuesta
     Delivery-->>UseCase: DeliveryResult (DELIVERED / FAILED)
-    UseCase->>Repo: guarda el resultado
+    UseCase->>Repo: complete(evento, resultado)
 ```
 
-`Repository Port` agrupa los dos puertos de persistencia del dominio — `SubscriptionPort` (busca el webhook) y `NotificationRecordPort` (guarda el resultado) — ambos son la misma clase de puerto: la interfaz para leer/guardar en donde sea que viva el dato, sin que el dominio sepa que hoy es PostgreSQL.
+`Repository Port` agrupa los dos puertos de persistencia del dominio — `SubscriptionPort` (busca el webhook) y `NotificationRecordPort` (el claim atómico y el resultado final) — ambos son la misma clase de puerto: la interfaz para leer/guardar en donde sea que viva el dato, sin que el dominio sepa que hoy es PostgreSQL.
 
-Antes de este camino, el servicio corta temprano si el evento ya fue entregado (idempotencia), si no hay webhook suscripto, o si el circuit breaker de ese webhook está abierto — ver [Idempotencia y resiliencia](#idempotencia-y-resiliencia), [Suscripciones y webhooks](#suscripciones-y-webhooks) y [API de self-service](#api-de-self-service-consulta-y-reintento-de-eventos) para `replay`.
+Antes de este camino, el servicio corta temprano si no hay webhook suscripto (`NOT_SUBSCRIBED`, sin tocar la base) o si pierde el claim atómico (`DUPLICATE` — ver [Concurrencia y race conditions](#concurrencia-y-race-conditions), que es también donde vive hoy la idempotencia); ya con el claim ganado, si el circuit breaker de ese webhook está abierto corta ahí (`CIRCUIT_OPEN`) sin llamar al webhook. Ver [Suscripciones y webhooks](#suscripciones-y-webhooks) y [API de self-service](#api-de-self-service-consulta-y-reintento-de-eventos) para `replay`.
 
 ## Idempotencia y resiliencia
 
 ### Idempotencia
 
-Antes de entregar un evento, `NotificationDeliveryService` chequea si ya fue entregado (`IdempotencyPort.isDuplicate`), para no reenviarlo si Kafka lo redelivera o la plataforma lo reenvía. La implementación (`InMemoryIdempotencyStore`) es un mapa en memoria, clave = `event_id` (único a nivel plataforma), con expiración por TTL.
-
-| Property | Qué configura |
-|---|---|
-| `idempotency.ttl` | Ventana de tiempo durante la cual un `event_id` ya marcado como entregado se considera duplicado. Pasado el TTL, un evento con ese id vuelve a ser elegible para entrega. |
-
-Es una caché en memoria de una sola instancia — no es la fuente de verdad. El estado durable de "ya entregado" es el `delivery_status` persistido en `notification_events`, que es lo que efectivamente evita un doble delivery en el endpoint de `replay`.
+La idempotencia no es una caché separada — es el mismo claim atómico en base que resuelve las race conditions (ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)): `event_id` es único a nivel plataforma, y una vez que un evento queda `DELIVERED`, ningún intento posterior (Kafka redeliver, un resend de la plataforma) vuelve a llamar al webhook — `NotificationRecordPort#tryClaim` lo rechaza directamente contra la fila persistida. No hay TTL ni ventana de expiración: es indefinido, porque la fuente de verdad es la propia tabla, no una caché.
 
 ### Retry
 
@@ -99,6 +92,38 @@ Es una caché en memoria de una sola instancia — no es la fuente de verdad. El
 | `notification.webhook.delivery.retry.exponential-backoff-multiplier` | Multiplicador aplicado a `wait-duration` en cada intento sucesivo (con 200ms y multiplicador 2.0: 200ms, 400ms, 800ms...). |
 
 Un evento cuya entrega falla definitivamente (reintentos agotados, o circuit breaker de ese webhook abierto — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)) queda registrado (`delivery_status=FAILED` o `CIRCUIT_OPEN`) y puede reintentarse explícitamente vía `POST /notification_events/{id}/replay` — ver [API de self-service](#api-de-self-service-consulta-y-reintento-de-eventos).
+
+## Concurrencia y race conditions
+
+Antes, "¿ya se procesó este evento?" y "marcarlo como procesado" eran dos pasos separados — chequear, entregar, recién después persistir. Cualquier cosa que se cruzara entre esos pasos (dos requests concurrentes para el mismo evento, un replay que corre dos veces, un crash justo después de llamarle al webhook) dejaba un estado inconsistente: doble entrega, o una entrega exitosa que el sistema nunca llegó a registrar. Ninguno de los dos problemas se arregla reordenando esos pasos — hace falta que **decidir quién procesa un evento sea, en sí mismo, una operación atómica y durable**, no una secuencia de pasos que alguien puede interrumpir en el medio.
+
+### El mecanismo: reservar la fila antes de llamar al webhook, no después
+
+`NotificationRecordPort#tryClaim` (para eventos nuevos, vía HTTP o Kafka) y `#tryClaimForReplay` (para `POST .../replay`) son cada uno **una sola sentencia SQL** contra `notification_events`:
+
+- `tryClaim`: `INSERT ... ON CONFLICT (client_id, event_id) DO UPDATE ... WHERE delivery_status IN ('FAILED', 'CIRCUIT_OPEN')`. Inserta la fila como `PROCESSING` si es la primera vez, o la vuelve a poner en `PROCESSING` si la última vez terminó en un estado legítimamente reintentable — cualquier otro caso (ya `DELIVERED`, o alguien más la está procesando en este mismo instante) no matchea el `WHERE`, el conflicto no se resuelve, y la sentencia devuelve 0 filas afectadas.
+- `tryClaimForReplay`: mismo criterio pero como `UPDATE ... WHERE notification_event_id = :id AND delivery_status IN ('FAILED', 'CIRCUIT_OPEN')`.
+
+Postgres resuelve el conflicto bajo lock de fila como parte de la propia sentencia — por eso, ante N llamadas concurrentes para el mismo evento (dos instancias, una redelivery de Kafka cruzándose con un reintento HTTP, dos replays al mismo tiempo), **una sola puede ganar** el claim (devuelve `true`); el resto recibe `false` sin haber tocado el webhook, y responde `DUPLICATE`. No es un `SELECT` seguido de un `INSERT` — es una única sentencia, así que no existe una ventana entre "consultar" y "actuar" donde otro caller pueda colarse.
+
+Recién después de ganar el claim se llama al webhook, y el resultado final se escribe con `NotificationRecordPort#complete` (otra sentencia separada, ya con el `delivery_status` terminal: `DELIVERED`, `FAILED`, `CIRCUIT_OPEN` o `NOT_SUBSCRIBED`). El claim y el `complete` son dos transacciones cortas independientes — la llamada HTTP al webhook (con sus reintentos) pasa **fuera** de cualquier transacción, para no mantener un lock de fila abierto en Postgres durante todo ese tiempo.
+
+### Por qué esto cierra la ventana de "entrega exitosa sin registro"
+
+Porque la fila ya existe en la base **antes** de llamar al webhook, no después. Si el proceso muere justo después de que el webhook respondió pero antes de que `complete` termine de escribir, el evento no desaparece — queda visible en `GET /notification_events` con `delivery_status=PROCESSING`, en vez de no existir en ningún lado.
+
+### La ventana que el claim solo no cierra
+
+Si el proceso muere entre ganar el claim y llamar a `complete`, esa fila queda en `PROCESSING` para siempre — nadie la va a reintentar automáticamente, porque como ya está claimeada no matchea el `WHERE` de `tryClaim`/`tryClaimForReplay`. `StuckProcessingRecoveryJob` es un barrido periódico (`@Scheduled`) que encuentra filas en `PROCESSING` más viejas que el umbral configurado y las pasa a `FAILED` — así vuelven a ser recuperables por el mismo `POST /notification_events/{id}/replay` que ya existe, sin necesidad de un mecanismo de recuperación aparte.
+
+| Property | Qué configura |
+|---|---|
+| `notification.events.stuck-processing.threshold` | Cuánto tiempo puede estar una fila en `PROCESSING` antes de considerarse atascada (el proceso que la reclamó murió a mitad de camino). |
+| `notification.events.stuck-processing.sweep-interval` | Cada cuánto corre el barrido que busca filas atascadas. |
+
+### Por qué esto es correcto entre réplicas, y no solo dentro de una instancia
+
+El mecanismo anterior (una caché en memoria por instancia) solo era correcto corriendo una única réplica — dos instancias no se enteraban una de la otra. El claim atómico usa Postgres como única fuente de verdad compartida, así que es correcto sin importar cuántas instancias del servicio estén corriendo al mismo tiempo: todas compiten por la misma fila, en la misma base. Mismo motivo por el que el circuit breaker vive en `subscriptions` y no en memoria (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). El único mecanismo que sigue siendo por-instancia hoy es `RateLimitFilter`, documentado como tal en [Rate limiting](#rate-limiting).
 
 ## Suscripciones y webhooks
 
@@ -165,10 +190,9 @@ Devuelve el detalle completo de un evento puntual.
 Reintenta la entrega de un evento puntual.
 
 - **Misma validación de seguridad que el GET por id**: `400` si el `x-user-id` no es el dueño del evento, `404` si no existe.
-- **No-op si ya está `DELIVERED`**: devuelve `DUPLICATE` sin volver a llamar al webhook — el `delivery_status` persistido es la fuente de verdad de "ya se entregó", no una caché en memoria.
-- **Se ejecuta sin importar el circuit breaker ni la caché de idempotencia** — las dos cosas que sí frenan el flujo automático:
-  - **Circuit breaker**: aunque el webhook esté `OPEN`, el replay igual intenta la entrega real — es la vía deliberada para recuperar un evento puntual sin esperar la ventana de `HALF_OPEN` (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). Su resultado sí se registra en el score, así que una racha de replays exitosos puede cerrar el circuito antes de tiempo.
-  - **Idempotencia**: `NotificationEventReplayService` nunca consulta la caché de duplicados (ver [Idempotencia](#idempotencia)) — esa caché existe para el flujo automático, no para decidir si un reintento manual puede ejecutarse.
+- **No-op si ya está `DELIVERED`**: devuelve `DUPLICATE` sin volver a llamar al webhook — el `delivery_status` persistido es la fuente de verdad de "ya se entregó".
+- **Tiene su propio claim atómico**, independiente del que usa el flujo automático (`NotificationRecordPort#tryClaimForReplay`, ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)) — así que dos replays simultáneos del mismo evento, o un replay que se cruza con una redelivery automática, nunca llaman al webhook los dos: solo uno gana el claim, el otro recibe `DUPLICATE`.
+- **Ignora el circuit breaker**: aunque el webhook esté `OPEN`, el replay igual intenta la entrega real — es la vía deliberada para recuperar un evento puntual sin esperar la ventana de `HALF_OPEN` (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). Su resultado sí se registra en el score, así que una racha de replays exitosos puede cerrar el circuito antes de tiempo.
 
 ## Otros endpoints
 
@@ -200,6 +224,7 @@ Todas se emiten como counters (vía `MetricsPort`, hoy implementado con Datadog/
 | `notification.webhook.delivery_blocked` | `event_type`, `client_id`, `webhook` | Cada intento automático de entrega que se saltea porque el circuit breaker de ese webhook ya está `OPEN` (no se llegó a llamar al webhook). |
 | `notification.events.saved` | `delivery_status`, `client_id` | Cada vez que se persiste el resultado final de un evento en la base, agrupado por el estado guardado (`DELIVERED`, `FAILED`, `CIRCUIT_OPEN`, etc). |
 | `notification.security.access_denied` | `client_id` | Cada `USER_MISMATCH` (un `x-user-id` pidiendo/reintentando un evento que no le pertenece). |
+| `notification.events.stuck_processing_recovered` | — | Cada vez que el barrido de `StuckProcessingRecoveryJob` encuentra y recupera filas atascadas en `PROCESSING` (ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)). Debería ser siempre cero en operación normal — si no lo es, algo está muriendo a mitad de una entrega. |
 
 ## Seguridad
 
@@ -244,7 +269,7 @@ El [rate limiting](#rate-limiting) es por IP — no hay autenticación (ver A01/
 
 ## Rate limiting
 
-Ver A05 en [Seguridad](#seguridad): mientras no haya autenticación (A01/A07) no hay una identidad confiable para usar como clave, así que `RateLimitFilter` limita requests por **IP del caller** (primer hop de `X-Forwarded-For` si está detrás de un proxy/load balancer, si no `getRemoteAddr()`), con un token bucket en memoria por IP — permite ráfagas cortas hasta la capacidad configurada, y se recarga a un ritmo constante. Mismo caveat que `InMemoryIdempotencyStore`: es por instancia, no compartido entre réplicas.
+Ver A05 en [Seguridad](#seguridad): mientras no haya autenticación (A01/A07) no hay una identidad confiable para usar como clave, así que `RateLimitFilter` limita requests por **IP del caller** (primer hop de `X-Forwarded-For` si está detrás de un proxy/load balancer, si no `getRemoteAddr()`), con un token bucket en memoria por IP — permite ráfagas cortas hasta la capacidad configurada, y se recarga a un ritmo constante. Es por instancia, no compartido entre réplicas — a diferencia del claim atómico de [Concurrencia y race conditions](#concurrencia-y-race-conditions), que vive en Postgres justamente para no tener ese problema.
 
 Dos niveles, cada uno con su propio balde (no comparten cupo):
 

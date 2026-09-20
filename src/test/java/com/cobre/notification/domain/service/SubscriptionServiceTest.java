@@ -17,6 +17,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.cobre.notification.domain.exception.SubscriptionNotFoundException;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.model.SubscriptionStatus;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
 
 @ExtendWith(MockitoExtension.class)
@@ -64,9 +65,11 @@ class SubscriptionServiceTest {
 	@Test
 	void listsAllSubscriptionsForAUser() {
 		SubscriptionService service = new SubscriptionService(subscriptionPort);
-		List<Subscription> subscriptions = List.of(
-				new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/webhooks/a"),
-				new Subscription("CLIENT001", "debit_card_withdrawal", "https://client.example.com/webhooks/b"));
+		List<SubscriptionStatus> subscriptions = List.of(
+				new SubscriptionStatus("CLIENT001", "credit_card_payment", "https://client.example.com/webhooks/a",
+						100, false),
+				new SubscriptionStatus("CLIENT001", "debit_card_withdrawal", "https://client.example.com/webhooks/b",
+						26, true));
 		given(subscriptionPort.findByUserId("CLIENT001")).willReturn(subscriptions);
 
 		assertThat(service.listByUserId("CLIENT001")).isEqualTo(subscriptions);

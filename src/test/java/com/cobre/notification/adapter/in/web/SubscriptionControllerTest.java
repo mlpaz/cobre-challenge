@@ -25,6 +25,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.cobre.notification.domain.exception.SubscriptionNotFoundException;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.model.SubscriptionStatus;
 import com.cobre.notification.domain.port.in.DeleteSubscriptionUseCase;
 import com.cobre.notification.domain.port.in.QuerySubscriptionsUseCase;
 import com.cobre.notification.domain.port.in.SubscribeUseCase;
@@ -130,14 +131,20 @@ class SubscriptionControllerTest {
 	@Test
 	void listsTheSubscriptionsForTheUserInTheHeader() throws Exception {
 		given(querySubscriptionsUseCase.listByUserId("CLIENT001")).willReturn(List.of(
-				new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/webhooks/a"),
-				new Subscription("CLIENT001", "debit_card_withdrawal", "https://client.example.com/webhooks/b")));
+				new SubscriptionStatus("CLIENT001", "credit_card_payment", "https://client.example.com/webhooks/a",
+						100, false),
+				new SubscriptionStatus("CLIENT001", "debit_card_withdrawal", "https://client.example.com/webhooks/b",
+						26, true)));
 
 		mockMvc.perform(get("/subscriptions").header("x-user-id", "CLIENT001"))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$[0].event_type").value("credit_card_payment"))
 				.andExpect(jsonPath("$[0].web_hook_url").value("https://client.example.com/webhooks/a"))
-				.andExpect(jsonPath("$[1].event_type").value("debit_card_withdrawal"));
+				.andExpect(jsonPath("$[0].success_score").value(100))
+				.andExpect(jsonPath("$[0].open").value(false))
+				.andExpect(jsonPath("$[1].event_type").value("debit_card_withdrawal"))
+				.andExpect(jsonPath("$[1].success_score").value(26))
+				.andExpect(jsonPath("$[1].open").value(true));
 	}
 
 	@Test

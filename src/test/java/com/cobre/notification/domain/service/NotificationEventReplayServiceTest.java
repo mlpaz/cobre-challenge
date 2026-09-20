@@ -22,7 +22,6 @@ import com.cobre.notification.domain.exception.NotificationEventNotFoundExceptio
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEventRecord;
-import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.NotificationEventQueryPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
@@ -46,14 +45,12 @@ class NotificationEventReplayServiceTest {
 	@Mock
 	private NotificationRecordPort notificationRecordPort;
 
-	@Mock
-	private IdempotencyPort idempotencyPort;
-
 	@Test
 	void redeliversAFailedEventAndRecordsTheNewResult() {
 		NotificationEventReplayService service = newService();
 		NotificationEventRecord record = aRecord(DeliveryStatus.FAILED, null);
 		given(queryPort.findById(NOTIFICATION_EVENT_ID)).willReturn(Optional.of(record));
+		given(notificationRecordPort.tryClaimForReplay(NOTIFICATION_EVENT_ID)).willReturn(true);
 		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment")).willReturn(Optional.of(WEBHOOK_URL));
 		DeliveryResult expected = new DeliveryResult("EVT001", DeliveryStatus.DELIVERED, "ref-new");
 		given(webhookDeliveryPort.deliver(any(), any())).willReturn(expected);
@@ -61,29 +58,25 @@ class NotificationEventReplayServiceTest {
 		DeliveryResult result = service.replay(NOTIFICATION_EVENT_ID, "CLIENT001");
 
 		assertThat(result).isEqualTo(expected);
-		verify(idempotencyPort).markAsProcessed(any());
-		verify(notificationRecordPort).save(any(), any());
+		verify(notificationRecordPort).complete(any(), any());
 	}
 
 	@Test
-	void attemptsDeliveryEvenWhenTheIdempotencyCacheAlreadyMarksTheEventAsProcessed() {
-		// The idempotency cache is a duplicate-delivery guard for the automatic
-		// flow (see NotificationDeliveryService), not a gate on manual replay: a
-		// deliberate retry must always be able to reach the webhook. The durable
-		// delivery_status (checked below) is what actually blocks a re-delivered
-		// DELIVERED event, not this cache.
+	void returnsDuplicateWithoutCallingTheWebhookWhenAConcurrentAttemptAlreadyWonTheClaim() {
+		// Two simultaneous replays of the same event, or a replay racing an
+		// automatic redelivery of the same event, must not both reach the
+		// webhook -- tryClaimForReplay is the single atomic statement that
+		// decides who wins.
 		NotificationEventReplayService service = newService();
 		NotificationEventRecord record = aRecord(DeliveryStatus.FAILED, null);
 		given(queryPort.findById(NOTIFICATION_EVENT_ID)).willReturn(Optional.of(record));
-		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment")).willReturn(Optional.of(WEBHOOK_URL));
-		DeliveryResult expected = new DeliveryResult("EVT001", DeliveryStatus.DELIVERED, "ref-new");
-		given(webhookDeliveryPort.deliver(any(), any())).willReturn(expected);
+		given(notificationRecordPort.tryClaimForReplay(NOTIFICATION_EVENT_ID)).willReturn(false);
 
 		DeliveryResult result = service.replay(NOTIFICATION_EVENT_ID, "CLIENT001");
 
-		assertThat(result).isEqualTo(expected);
-		verify(webhookDeliveryPort).deliver(any(), any());
-		verify(idempotencyPort, never()).isDuplicate(any());
+		assertThat(result).isEqualTo(new DeliveryResult("EVT001", DeliveryStatus.DUPLICATE, null));
+		verify(webhookDeliveryPort, never()).deliver(any(), any());
+		verify(notificationRecordPort, never()).complete(any(), any());
 	}
 
 	@Test
@@ -96,7 +89,8 @@ class NotificationEventReplayServiceTest {
 
 		assertThat(result).isEqualTo(new DeliveryResult("EVT001", DeliveryStatus.DUPLICATE, "ref-old"));
 		verify(webhookDeliveryPort, never()).deliver(any(), any());
-		verify(notificationRecordPort, never()).save(any(), any());
+		verify(notificationRecordPort, never()).tryClaimForReplay(any());
+		verify(notificationRecordPort, never()).complete(any(), any());
 	}
 
 	@Test
@@ -104,14 +98,32 @@ class NotificationEventReplayServiceTest {
 		NotificationEventReplayService service = newService();
 		NotificationEventRecord record = aRecord(DeliveryStatus.FAILED, null);
 		given(queryPort.findById(NOTIFICATION_EVENT_ID)).willReturn(Optional.of(record));
+		given(notificationRecordPort.tryClaimForReplay(NOTIFICATION_EVENT_ID)).willReturn(true);
 		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment")).willReturn(Optional.of(WEBHOOK_URL));
 		given(webhookDeliveryPort.deliver(any(), any())).willThrow(new NotificationDeliveryException("boom", null));
 
 		DeliveryResult result = service.replay(NOTIFICATION_EVENT_ID, "CLIENT001");
 
 		assertThat(result).isEqualTo(new DeliveryResult("EVT001", DeliveryStatus.FAILED, null));
-		verify(idempotencyPort, never()).markAsProcessed(any());
-		verify(notificationRecordPort).save(any(), any());
+		verify(notificationRecordPort).complete(any(), any());
+	}
+
+	@Test
+	void resolvesTheClaimAsNotSubscribedWhenTheSubscriptionWasRemovedSinceTheOriginalAttempt() {
+		NotificationEventReplayService service = newService();
+		NotificationEventRecord record = aRecord(DeliveryStatus.FAILED, null);
+		given(queryPort.findById(NOTIFICATION_EVENT_ID)).willReturn(Optional.of(record));
+		given(notificationRecordPort.tryClaimForReplay(NOTIFICATION_EVENT_ID)).willReturn(true);
+		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment")).willReturn(Optional.empty());
+
+		DeliveryResult result = service.replay(NOTIFICATION_EVENT_ID, "CLIENT001");
+
+		assertThat(result).isEqualTo(new DeliveryResult("EVT001", DeliveryStatus.NOT_SUBSCRIBED, null));
+		verify(webhookDeliveryPort, never()).deliver(any(), any());
+		// The claim already moved this row to PROCESSING, so it must still be
+		// resolved -- leaving it claimed and unresolved is exactly the stuck-row
+		// bug the claim/complete discipline exists to avoid.
+		verify(notificationRecordPort).complete(any(), any());
 	}
 
 	@Test
@@ -136,7 +148,7 @@ class NotificationEventReplayServiceTest {
 
 	private NotificationEventReplayService newService() {
 		return new NotificationEventReplayService(queryPort, subscriptionPort, webhookDeliveryPort,
-				notificationRecordPort, idempotencyPort);
+				notificationRecordPort);
 	}
 
 	private static NotificationEventRecord aRecord(DeliveryStatus status, String webhookResponse) {

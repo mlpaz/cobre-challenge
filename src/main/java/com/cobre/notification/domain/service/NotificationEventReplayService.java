@@ -13,7 +13,6 @@ import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.model.NotificationEventRecord;
 import com.cobre.notification.domain.port.in.ReplayNotificationEventUseCase;
-import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.NotificationEventQueryPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
@@ -26,16 +25,13 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 	private final SubscriptionPort subscriptionPort;
 	private final WebhookDeliveryPort webhookDeliveryPort;
 	private final NotificationRecordPort notificationRecordPort;
-	private final IdempotencyPort idempotencyPort;
 
 	public NotificationEventReplayService(NotificationEventQueryPort queryPort, SubscriptionPort subscriptionPort,
-			WebhookDeliveryPort webhookDeliveryPort, NotificationRecordPort notificationRecordPort,
-			IdempotencyPort idempotencyPort) {
+			WebhookDeliveryPort webhookDeliveryPort, NotificationRecordPort notificationRecordPort) {
 		this.queryPort = queryPort;
 		this.subscriptionPort = subscriptionPort;
 		this.webhookDeliveryPort = webhookDeliveryPort;
 		this.notificationRecordPort = notificationRecordPort;
-		this.idempotencyPort = idempotencyPort;
 	}
 
 	@Override
@@ -53,12 +49,27 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 			return new DeliveryResult(record.eventId(), DeliveryStatus.DUPLICATE, record.webhookResponse());
 		}
 
+		// Atomic claim (see NotificationRecordPort#tryClaimForReplay): only one
+		// concurrent replay of this same event -- or a concurrent automatic
+		// redelivery racing this replay -- can win it. Whoever loses must not
+		// call the webhook again; report the same DUPLICATE a losing automatic
+		// attempt would see.
+		if (!notificationRecordPort.tryClaimForReplay(notificationEventId)) {
+			return new DeliveryResult(record.eventId(), DeliveryStatus.DUPLICATE, record.webhookResponse());
+		}
+
 		NotificationEvent event = new NotificationEvent(record.eventId(), record.eventType(), record.content(),
 				record.eventDeliveryDate(), record.clientId());
 
 		Optional<String> webHookUrl = subscriptionPort.findWebHookUrl(event.clientId(), event.eventType());
 		if (webHookUrl.isEmpty()) {
-			return new DeliveryResult(event.eventId(), DeliveryStatus.NOT_SUBSCRIBED, null);
+			// The subscription was removed since this event was first recorded.
+			// The claim above already moved this row to PROCESSING, so it must be
+			// resolved here -- leaving it claimed and unresolved is exactly the
+			// stuck-row bug this whole claim/complete discipline exists to avoid.
+			DeliveryResult result = new DeliveryResult(event.eventId(), DeliveryStatus.NOT_SUBSCRIBED, null);
+			notificationRecordPort.complete(event, result);
+			return result;
 		}
 
 		// A manual replay is a deliberate, one-off retry: it always attempts
@@ -71,11 +82,10 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 		DeliveryResult result;
 		try {
 			result = webhookDeliveryPort.deliver(event, webHookUrl.get());
-			idempotencyPort.markAsProcessed(event);
 		} catch (NotificationDeliveryException e) {
 			result = new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null);
 		}
-		notificationRecordPort.save(event, result);
+		notificationRecordPort.complete(event, result);
 		return result;
 	}
 }

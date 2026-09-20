@@ -3,9 +3,7 @@ package com.cobre.notification.adapter.out.persistence;
 import java.time.Instant;
 import java.util.UUID;
 
-import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
-import com.cobre.notification.domain.model.NotificationEvent;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -14,6 +12,15 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
+/**
+ * Read-only projection of a {@code notification_events} row. Writes go
+ * through the native, atomic {@code INSERT ... ON CONFLICT} / {@code UPDATE}
+ * queries in {@link NotificationEventJpaRepository} (see
+ * {@link NotificationRecordJpaAdapter}), never through Hibernate's own
+ * persistence lifecycle for this entity — that's what makes the claim in
+ * {@code tryClaim}/{@code tryClaimForReplay} a single atomic statement
+ * instead of a check-then-write race.
+ */
 @Entity
 @Table(name = "notification_events")
 public class NotificationEventEntity {
@@ -49,22 +56,6 @@ public class NotificationEventEntity {
 
 	protected NotificationEventEntity() {
 		// required by JPA
-	}
-
-	NotificationEventEntity(NotificationEvent event, DeliveryResult result, Instant processedAt) {
-		this.notificationEventId = UUID.randomUUID();
-		this.eventId = event.eventId();
-		this.clientId = event.clientId();
-		applyResult(event, result, processedAt);
-	}
-
-	void applyResult(NotificationEvent event, DeliveryResult result, Instant processedAt) {
-		this.eventType = event.eventType();
-		this.content = event.content();
-		this.eventDeliveryDate = event.deliveryDate();
-		this.deliveryStatus = result.status();
-		this.webhookResponse = result.webhookResponse();
-		this.processedAt = processedAt;
 	}
 
 	public UUID getNotificationEventId() {

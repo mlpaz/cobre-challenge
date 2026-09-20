@@ -1,6 +1,7 @@
 package com.cobre.notification.adapter.out.persistence;
 
 import java.time.Instant;
+import java.util.UUID;
 
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,11 +21,28 @@ public class NotificationRecordJpaAdapter implements NotificationRecordPort {
 
 	@Override
 	@Transactional
-	public void save(NotificationEvent event, DeliveryResult result) {
-		Instant processedAt = Instant.now();
-		repository.findByClientIdAndEventId(event.clientId(), event.eventId())
-				.ifPresentOrElse(
-						existing -> existing.applyResult(event, result, processedAt),
-						() -> repository.save(new NotificationEventEntity(event, result, processedAt)));
+	public boolean tryClaim(NotificationEvent event) {
+		int rows = repository.tryClaim(UUID.randomUUID(), event.eventId(), event.clientId(), event.eventType(),
+				event.content(), event.deliveryDate(), Instant.now());
+		return rows > 0;
+	}
+
+	@Override
+	@Transactional
+	public boolean tryClaimForReplay(UUID notificationEventId) {
+		return repository.tryClaimForReplay(notificationEventId) > 0;
+	}
+
+	@Override
+	@Transactional
+	public void complete(NotificationEvent event, DeliveryResult result) {
+		repository.complete(event.clientId(), event.eventId(), result.status().name(), result.webhookResponse(),
+				Instant.now());
+	}
+
+	@Override
+	@Transactional
+	public int recoverStuckProcessing(Instant olderThan) {
+		return repository.failStuckProcessing(olderThan);
 	}
 }

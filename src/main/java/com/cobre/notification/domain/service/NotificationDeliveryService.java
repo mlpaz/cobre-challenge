@@ -11,7 +11,6 @@ import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.in.SendNotificationUseCase;
-import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.MetricsPort;
 import com.cobre.notification.domain.port.out.MetricsTags;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
@@ -24,17 +23,15 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 
 	private static final Logger log = LoggerFactory.getLogger(NotificationDeliveryService.class);
 
-	private final IdempotencyPort idempotencyPort;
 	private final SubscriptionPort subscriptionPort;
 	private final WebhookDeliveryPort webhookDeliveryPort;
 	private final NotificationRecordPort notificationRecordPort;
 	private final MetricsPort metricsPort;
 	private final WebhookCircuitBreakerPort webhookCircuitBreakerPort;
 
-	public NotificationDeliveryService(IdempotencyPort idempotencyPort, SubscriptionPort subscriptionPort,
-			WebhookDeliveryPort webhookDeliveryPort, NotificationRecordPort notificationRecordPort,
-			MetricsPort metricsPort, WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
-		this.idempotencyPort = idempotencyPort;
+	public NotificationDeliveryService(SubscriptionPort subscriptionPort, WebhookDeliveryPort webhookDeliveryPort,
+			NotificationRecordPort notificationRecordPort, MetricsPort metricsPort,
+			WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
 		this.subscriptionPort = subscriptionPort;
 		this.webhookDeliveryPort = webhookDeliveryPort;
 		this.notificationRecordPort = notificationRecordPort;
@@ -50,12 +47,6 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 				event.clientId());
 		metricsPort.increment("notification.events.received", eventTypeTag, clientIdTag);
 
-		if (idempotencyPort.isDuplicate(event)) {
-			log.info("Notification event {} is a duplicate, skipping delivery", event.eventId());
-			metricsPort.increment("notification.events.duplicate", eventTypeTag, clientIdTag);
-			return new DeliveryResult(event.eventId(), DeliveryStatus.DUPLICATE, null);
-		}
-
 		Optional<String> webHookUrl = subscriptionPort.findWebHookUrl(event.clientId(), event.eventType());
 		if (webHookUrl.isEmpty()) {
 			log.info("No webhook subscription found for client={} eventType={}", event.clientId(), event.eventType());
@@ -65,6 +56,18 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 		String webhookTag = MetricsTags.WEBHOOK.of(webHookUrl.get());
 		log.debug("Webhook subscription found for client={} eventType={}", event.clientId(), event.eventType());
 		metricsPort.increment("notification.subscription.webhook_found", eventTypeTag, clientIdTag, webhookTag);
+
+		// Atomic claim in the DB (a single INSERT ... ON CONFLICT ... statement,
+		// see NotificationRecordPort#tryClaim) is what actually prevents two
+		// concurrent deliveries of the same event -- a Kafka redelivery racing
+		// an HTTP retry, two instances, etc -- from both calling the webhook.
+		// Losing the race, or the event already being DELIVERED before, both
+		// come back here as "not claimed": neither may call the webhook.
+		if (!notificationRecordPort.tryClaim(event)) {
+			log.info("Notification event {} is a duplicate, skipping delivery", event.eventId());
+			metricsPort.increment("notification.events.duplicate", eventTypeTag, clientIdTag);
+			return new DeliveryResult(event.eventId(), DeliveryStatus.DUPLICATE, null);
+		}
 
 		DeliveryResult result;
 		if (!webhookCircuitBreakerPort.isCallPermitted(event.clientId(), event.eventType())) {
@@ -82,7 +85,6 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 				// (including internal retries) into the webhook's circuit breaker
 				// score — see WebhookHttpClient — so nothing more to record here.
 				result = webhookDeliveryPort.deliver(event, webHookUrl.get());
-				idempotencyPort.markAsProcessed(event);
 			} catch (NotificationDeliveryException e) {
 				// Delivery definitively failed (retries exhausted). We still answer
 				// normally: returning an error status here could make a caller (an
@@ -94,7 +96,7 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 				result = new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null);
 			}
 		}
-		notificationRecordPort.save(event, result);
+		notificationRecordPort.complete(event, result);
 		log.info("Notification event {} saved with status={}", event.eventId(), result.status());
 		metricsPort.increment("notification.events.saved", MetricsTags.DELIVERY_STATUS.of(result.status()), clientIdTag);
 		return result;

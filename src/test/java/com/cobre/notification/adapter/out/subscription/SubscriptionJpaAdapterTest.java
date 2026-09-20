@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.cobre.notification.AbstractPostgresIntegrationTest;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.model.SubscriptionStatus;
 import com.cobre.notification.domain.model.WebhookCircuitState;
 
 /**
@@ -112,6 +113,25 @@ class SubscriptionJpaAdapterTest extends AbstractPostgresIntegrationTest {
 		assertThat(entity.getSuccessScore()).isEqualTo(10);
 		assertThat(entity.getTotalCalls()).isEqualTo(5);
 		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.OPEN);
+	}
+
+	@Test
+	void findByUserIdReportsTheScoreAndClosedStateOfAHealthyWebhook() {
+		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
+
+		assertThat(adapter.findByUserId("CLIENT001")).containsExactly(
+				new SubscriptionStatus("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a", 100,
+						false));
+	}
+
+	@Test
+	void findByUserIdReportsOpenTrueOnceTheCircuitBreakerHasTripped() {
+		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
+		degradeCircuitBreakerState();
+
+		assertThat(adapter.findByUserId("CLIENT001")).containsExactly(
+				new SubscriptionStatus("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a", 10,
+						true));
 	}
 
 	private void degradeCircuitBreakerState() {

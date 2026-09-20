@@ -5,12 +5,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
 
 /**
- * One token bucket per key (here, caller IP), in memory. Same caveat as
- * {@link com.cobre.notification.adapter.out.idempotency.InMemoryIdempotencyStore}:
- * correct for a single instance only — a multi-instance deployment needs a
- * shared store (e.g. Redis) so every instance enforces the same quota, and
- * this map is never evicted, so it grows with the number of distinct callers
- * seen since startup.
+ * One token bucket per key (here, caller IP), in memory. Correct for a
+ * single instance only — a multi-instance deployment needs a shared store
+ * (e.g. Redis) so every instance enforces the same quota, and this map is
+ * never evicted, so it grows with the number of distinct callers seen since
+ * startup.
  */
 class RateLimiter {
 
