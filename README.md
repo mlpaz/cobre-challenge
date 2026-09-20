@@ -74,7 +74,7 @@ sequenceDiagram
 
 `Repository Port` agrupa los dos puertos de persistencia del dominio — `SubscriptionPort` (busca el webhook) y `NotificationRecordPort` (guarda el resultado) — ambos son la misma clase de puerto: la interfaz para leer/guardar en donde sea que viva el dato, sin que el dominio sepa que hoy es PostgreSQL.
 
-Antes de este camino, el servicio corta temprano si el evento ya fue entregado (idempotencia), si no hay webhook suscripto, o si el circuit breaker de ese webhook está abierto — ver [Idempotencia y resiliencia](#idempotencia-y-resiliencia), [Suscripciones y webhooks](#suscripciones-y-webhooks) y la tabla de [otros endpoints](#otros-endpoints) para `replay`.
+Antes de este camino, el servicio corta temprano si el evento ya fue entregado (idempotencia), si no hay webhook suscripto, o si el circuit breaker de ese webhook está abierto — ver [Idempotencia y resiliencia](#idempotencia-y-resiliencia), [Suscripciones y webhooks](#suscripciones-y-webhooks) y [API de self-service](#api-de-self-service-consulta-y-reintento-de-eventos) para `replay`.
 
 ## Idempotencia y resiliencia
 
@@ -101,7 +101,7 @@ Es una caché en memoria de una sola instancia — no es la fuente de verdad. El
 | `notification.provider.retry.wait-duration` | Espera base entre reintentos. |
 | `notification.provider.retry.exponential-backoff-multiplier` | Multiplicador aplicado a `wait-duration` en cada intento sucesivo (con 200ms y multiplicador 2.0: 200ms, 400ms, 800ms...). |
 
-Un evento cuya entrega falla definitivamente (reintentos agotados, o circuit breaker de ese webhook abierto — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)) queda registrado (`delivery_status=FAILED` o `CIRCUIT_OPEN`) y puede reintentarse explícitamente vía `POST /notification_events/{id}/replay`.
+Un evento cuya entrega falla definitivamente (reintentos agotados, o circuit breaker de ese webhook abierto — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)) queda registrado (`delivery_status=FAILED` o `CIRCUIT_OPEN`) y puede reintentarse explícitamente vía `POST /notification_events/{id}/replay` — ver [API de self-service](#api-de-self-service-consulta-y-reintento-de-eventos).
 
 ## Suscripciones y webhooks
 
@@ -143,22 +143,44 @@ Transiciones (`WebhookCircuitBreakerJpaAdapter`):
 | `notification.webhook.circuit-breaker.permitted-number-of-calls-in-half-open-state` | Cantidad de llamadas de prueba permitidas en `HALF_OPEN`. |
 | `notification.webhook.circuit-breaker.score-smoothing-factor` | El `α` del promedio ponderado del score (0-1). Más alto = el score reacciona más rápido a los resultados recientes. |
 
-### El replay nunca queda bloqueado
+## API de self-service: consulta y reintento de eventos
 
-`POST /notification_events/{id}/replay` (reintento manual) **ignora** tanto el circuit breaker del webhook como la caché de idempotencia — las dos cosas que sí frenan el flujo automático:
+Estos tres endpoints son el corazón de la self-service API pedida por el caso: que cada cliente pueda consultar el estado de sus propias notificaciones y reintentar las que fallaron, sin depender del equipo de plataforma.
 
-- **Circuit breaker**: siempre intenta la entrega real, incluso con el webhook en `OPEN`. Es la vía deliberada para recuperar un evento puntual sin esperar la ventana de `HALF_OPEN`. Su resultado sí se registra en el score — una racha de replays exitosos puede cerrar el circuito antes de que termine la ventana de espera, sin necesidad de tráfico automático.
-- **Idempotencia**: `NotificationEventReplayService` nunca consulta `IdempotencyPort.isDuplicate` — esa caché existe para no reentregar un evento en el flujo automático (ver [Idempotencia](#idempotencia)), no para decidir si un reintento manual puede o no ejecutarse. Lo que sí bloquea un replay es el `delivery_status` persistido: si ya está `DELIVERED`, es un no-op (ver más abajo), pero eso lo decide la base, no la caché en memoria.
+### `GET /notification_events` — listar eventos
+
+Lista los eventos del cliente indicado en el header `x-user-id`.
+
+- **Filtros** (opcionales): `delivery_status` y rango de fecha del evento (`created_from` / `created_to`, sobre `event_delivery_date`).
+- **Paginado**: `limit` y `offset` como query params, con topes configurables (`notification.events.query.default-limit`, `max-limit`, `max-offset`) para que nadie pueda forzar un escaneo completo de la tabla en un solo request — pasarse de esos topes devuelve `400` (`INVALID_PAGINATION`).
+- **Orden**: siempre por `delivery_date` descendente (el más reciente primero), para que la paginación sea estable.
+- La respuesta trae `total_elements` además de los `items`, para que el cliente sepa cuánto le falta paginar.
+
+### `GET /notification_events/{notification_event_id}` — detalle de un evento
+
+Devuelve el detalle completo de un evento puntual.
+
+- **Seguridad**: cada evento pertenece a un `client_id`; si el `x-user-id` del request no coincide, `400` (`USER_MISMATCH`) — no `404`, para no filtrar si el id existe o no. Ese mismatch queda loggeado y con su propia métrica (`notification.security.access_denied`) para poder detectar intentos de acceso a eventos ajenos (ver [A01 en Seguridad](#seguridad) para la limitación de que `x-user-id` en sí todavía no está autenticado).
+- `404` (`NOTIFICATION_EVENT_NOT_FOUND`) si el id no existe.
+
+### `POST /notification_events/{notification_event_id}/replay` — reintentar una entrega
+
+Reintenta la entrega de un evento puntual.
+
+- **Misma validación de seguridad que el GET por id**: `400` si el `x-user-id` no es el dueño del evento, `404` si no existe.
+- **No-op si ya está `DELIVERED`**: devuelve `DUPLICATE` sin volver a llamar al provider — el `delivery_status` persistido es la fuente de verdad de "ya se entregó", no una caché en memoria.
+- **Se ejecuta sin importar el circuit breaker ni la caché de idempotencia** — las dos cosas que sí frenan el flujo automático:
+  - **Circuit breaker**: aunque el webhook esté `OPEN`, el replay igual intenta la entrega real — es la vía deliberada para recuperar un evento puntual sin esperar la ventana de `HALF_OPEN` (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). Su resultado sí se registra en el score, así que una racha de replays exitosos puede cerrar el circuito antes de tiempo.
+  - **Idempotencia**: `NotificationEventReplayService` nunca consulta la caché de duplicados (ver [Idempotencia](#idempotencia)) — esa caché existe para el flujo automático, no para decidir si un reintento manual puede ejecutarse.
 
 ## Otros endpoints
 
 | Método | Path | Descripción |
 |---|---|---|
 | `POST` | `/notification_events` | Ingesta manual de un evento (mismo caso de uso que consume el Kafka listener). Body: `event_id`, `event_type`, `content`, `delivery_date`, `client_id`. |
-| `GET` | `/notification_events` | Lista los eventos del cliente indicado en el header `x-user-id`. Filtros opcionales `delivery_status`, `created_from`, `created_to`; paginado con `limit`/`offset` (con topes configurables); ordenado por `delivery_date` descendente. |
-| `GET` | `/notification_events/{notification_event_id}` | Detalle de un evento. `400` si el `x-user-id` no coincide con el dueño del evento, `404` si no existe. |
-| `POST` | `/notification_events/{notification_event_id}/replay` | Reintenta la entrega. Si ya está `DELIVERED`, es un no-op (no vuelve a llamar al provider). Misma validación de `x-user-id` que el GET por id. |
 | `POST` | `/subscriptions` | Crea o actualiza el webhook del cliente indicado en `x-user-id` para un tipo de evento. Body: `event_type`, `web_hook_url`. |
+| `GET` | `/subscriptions` | Lista las suscripciones del cliente indicado en `x-user-id` (una fila por `event_type`). |
+| `PUT` | `/subscriptions/{event_type}` | Actualiza el webhook de una suscripción existente del cliente en `x-user-id`. A diferencia del `POST`, no crea una suscripción nueva: `404` (`SUBSCRIPTION_NOT_FOUND`) si no existía. |
 | `GET` | `/health` | Liveness check. |
 
 ## Métricas
@@ -168,7 +190,7 @@ Todas se emiten como counters (vía `MetricsPort`, hoy implementado con Datadog/
 `client_id` está en todas — es el tag más útil para aislar el comportamiento de un cliente puntual. `webhook` (la URL del webhook) se suma en las métricas que ya conocen esa URL en el momento de emitirse.
 
 | Métrica | Tags | Qué mide |
-|---|---|---|
+|---|---|-----------------------------------------------------------------------------------------------|
 | `notification.events.received` | `event_type`, `client_id` | Cada evento que entra al flujo de entrega (desde Kafka o HTTP), antes de cualquier chequeo. Volumen total de eventos procesados. |
 | `notification.events.duplicate` | `event_type`, `client_id` | Eventos descartados por el chequeo de idempotencia (ya habían sido entregados). Sirve para medir cuántos duplicados llegan. |
 | `notification.subscription.webhook_found` | `event_type`, `client_id`, `webhook` | Búsquedas de suscripción que encontraron un webhook activo para ese `client_id` + `event_type`. |
