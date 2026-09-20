@@ -8,6 +8,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.model.SubscriptionStatus;
+import com.cobre.notification.domain.model.WebhookCircuitState;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
 
 @Component
@@ -34,9 +36,11 @@ public class SubscriptionJpaAdapter implements SubscriptionPort {
 	}
 
 	@Override
-	public List<Subscription> findByUserId(String userId) {
+	public List<SubscriptionStatus> findByUserId(String userId) {
 		return repository.findByUserIdOrderByEventTypeAsc(userId).stream()
-				.map(entity -> new Subscription(entity.getUserId(), entity.getEventType(), entity.getWebHookUrl()))
+				.map(entity -> new SubscriptionStatus(entity.getUserId(), entity.getEventType(),
+						entity.getWebHookUrl(), entity.getSuccessScore(),
+						entity.getCircuitState() == WebhookCircuitState.OPEN))
 				.toList();
 	}
 

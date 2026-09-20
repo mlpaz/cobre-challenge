@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.cobre.notification.adapter.in.web.dto.SubscriptionRequest;
 import com.cobre.notification.adapter.in.web.dto.SubscriptionResponse;
+import com.cobre.notification.adapter.in.web.dto.SubscriptionStatusResponse;
 import com.cobre.notification.adapter.in.web.dto.SubscriptionUpdateRequest;
 import com.cobre.notification.domain.model.Subscription;
 import com.cobre.notification.domain.port.in.DeleteSubscriptionUseCase;
@@ -68,16 +69,17 @@ public class SubscriptionController {
 	}
 
 	@Operation(summary = "Lista las suscripciones del cliente autenticado",
-			description = "Devuelve una fila por event_type suscripto para el x-user-id del caller.")
+			description = "Devuelve una fila por event_type suscripto para el x-user-id del caller, con el score "
+					+ "y el estado del circuit breaker de cada webhook.")
 	@ApiResponse(responseCode = "200", description = "Suscripciones del cliente (puede ser una lista vacía)")
 	@ApiResponse(responseCode = "400", description = "Falta el header x-user-id")
 	@GetMapping
-	public ResponseEntity<List<SubscriptionResponse>> list(
+	public ResponseEntity<List<SubscriptionStatusResponse>> list(
 			@Parameter(description = "Identificador del cliente dueño de las suscripciones", required = true)
 			@RequestHeader(USER_ID_HEADER) String userId) {
-		List<SubscriptionResponse> subscriptions = querySubscriptionsUseCase.listByUserId(userId).stream()
-				.map(subscription -> new SubscriptionResponse(subscription.userId(), subscription.eventType(),
-						subscription.webHookUrl()))
+		List<SubscriptionStatusResponse> subscriptions = querySubscriptionsUseCase.listByUserId(userId).stream()
+				.map(status -> new SubscriptionStatusResponse(status.userId(), status.eventType(),
+						status.webHookUrl(), status.successScore(), status.open()))
 				.toList();
 		return ResponseEntity.ok(subscriptions);
 	}

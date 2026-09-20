@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 
 import com.cobre.notification.domain.exception.SubscriptionNotFoundException;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.model.SubscriptionStatus;
 import com.cobre.notification.domain.port.in.DeleteSubscriptionUseCase;
 import com.cobre.notification.domain.port.in.QuerySubscriptionsUseCase;
 import com.cobre.notification.domain.port.in.SubscribeUseCase;
@@ -36,7 +37,7 @@ public class SubscriptionService implements SubscribeUseCase, UpdateSubscription
 	}
 
 	@Override
-	public List<Subscription> listByUserId(String userId) {
+	public List<SubscriptionStatus> listByUserId(String userId) {
 		return subscriptionPort.findByUserId(userId);
 	}
 
