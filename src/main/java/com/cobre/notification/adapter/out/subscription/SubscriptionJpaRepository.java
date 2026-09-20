@@ -12,5 +12,6 @@ public interface SubscriptionJpaRepository extends JpaRepository<SubscriptionEnt
 
 	List<SubscriptionEntity> findByUserIdOrderByEventTypeAsc(String userId);
 
-	void deleteByUserIdAndEventType(String userId, String eventType);
+	/** Used to tell whether a (client, webhook URL) pair is still referenced by any subscription. */
+	boolean existsByUserIdAndWebHookUrl(String userId, String webHookUrl);
 }

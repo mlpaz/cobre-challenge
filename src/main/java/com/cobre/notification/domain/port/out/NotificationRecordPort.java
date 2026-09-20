@@ -1,10 +1,12 @@
 package com.cobre.notification.domain.port.out;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.NotificationEvent;
+import com.cobre.notification.domain.model.RecoveredStuckEvent;
 
 public interface NotificationRecordPort {
 
@@ -46,7 +48,8 @@ public interface NotificationRecordPort {
 	 * instead of staying claimed forever — see the scheduled job that calls
 	 * this.
 	 *
-	 * @return how many rows were recovered.
+	 * @return the identity (client_id, event_type) of every row recovered,
+	 *         one entry per row — used to tag the recovery metric per event.
 	 */
-	int recoverStuckProcessing(Instant olderThan);
+	List<RecoveredStuckEvent> recoverStuckProcessing(Instant olderThan);
 }

@@ -1,4 +1,4 @@
-package com.cobre.notification.adapter.out.subscription.config;
+package com.cobre.notification.adapter.out.circuitbreaker.config;
 
 import java.time.Duration;
 

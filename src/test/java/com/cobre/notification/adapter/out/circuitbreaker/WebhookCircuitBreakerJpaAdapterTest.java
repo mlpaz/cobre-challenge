@@ -1,4 +1,4 @@
-package com.cobre.notification.adapter.out.subscription;
+package com.cobre.notification.adapter.out.circuitbreaker;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.verify;
@@ -15,8 +15,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.cobre.notification.AbstractPostgresIntegrationTest;
-import com.cobre.notification.adapter.out.subscription.config.WebhookCircuitBreakerProperties;
+import com.cobre.notification.adapter.out.circuitbreaker.config.WebhookCircuitBreakerProperties;
+import com.cobre.notification.adapter.out.subscription.SubscriptionJpaAdapter;
+import com.cobre.notification.adapter.out.subscription.SubscriptionJpaRepository;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.model.SubscriptionStatus;
 import com.cobre.notification.domain.model.WebhookCircuitState;
 import com.cobre.notification.domain.port.out.MetricsPort;
 
@@ -37,7 +40,10 @@ class WebhookCircuitBreakerJpaAdapterTest extends AbstractPostgresIntegrationTes
 	private SubscriptionJpaAdapter subscriptionAdapter;
 
 	@Autowired
-	private SubscriptionJpaRepository repository;
+	private SubscriptionJpaRepository subscriptionRepository;
+
+	@Autowired
+	private WebhookCircuitBreakerJpaRepository repository;
 
 	private final MutableClock clock = new MutableClock(Instant.parse("2024-01-01T00:00:00Z"));
 	private final MetricsPort metricsPort = Mockito.mock(MetricsPort.class);
@@ -133,7 +139,7 @@ class WebhookCircuitBreakerJpaAdapterTest extends AbstractPostgresIntegrationTes
 
 		breaker.recordResult(CLIENT_ID, EVENT_TYPE, true); // score 13*0.5 + 100*0.5 = 57 (>= 50)
 
-		SubscriptionEntity entity = findEntity();
+		WebhookCircuitBreakerEntity entity = findEntity();
 		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.CLOSED);
 		assertThat(entity.getHalfOpenCalls()).isZero();
 		assertThat(breaker.isCallPermitted(CLIENT_ID, EVENT_TYPE)).isTrue();
@@ -149,7 +155,7 @@ class WebhookCircuitBreakerJpaAdapterTest extends AbstractPostgresIntegrationTes
 
 		breaker.recordResult(CLIENT_ID, EVENT_TYPE, false);
 
-		SubscriptionEntity entity = findEntity();
+		WebhookCircuitBreakerEntity entity = findEntity();
 		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.OPEN);
 		assertThat(entity.getCircuitOpenedAt()).isEqualTo(clock.instant());
 		verify(metricsPort).increment("notification.webhook.circuit_opened", "event_type:" + EVENT_TYPE,
@@ -169,6 +175,119 @@ class WebhookCircuitBreakerJpaAdapterTest extends AbstractPostgresIntegrationTes
 		assertThat(findEntity().getCircuitState()).isEqualTo(WebhookCircuitState.CLOSED);
 	}
 
+	@Test
+	void newSubscriptionsStartWithAHealthyCircuitBreakerState() {
+		subscribe();
+
+		WebhookCircuitBreakerEntity entity = findEntity();
+		assertThat(entity.getSuccessScore()).isEqualTo(100);
+		assertThat(entity.getTotalCalls()).isZero();
+		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.CLOSED);
+	}
+
+	@Test
+	void changingToABrandNewWebHookUrlStartsAFreshHealthyBreaker() {
+		subscriptionAdapter.save(new Subscription(CLIENT_ID, EVENT_TYPE, "https://client.example.com/hooks/old"));
+		degradeCircuitBreakerState("https://client.example.com/hooks/old");
+
+		subscriptionAdapter.save(new Subscription(CLIENT_ID, EVENT_TYPE, "https://client.example.com/hooks/new"));
+
+		WebhookCircuitBreakerEntity entity = findEntity("https://client.example.com/hooks/new");
+		assertThat(entity.getSuccessScore()).isEqualTo(100);
+		assertThat(entity.getTotalCalls()).isZero();
+		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.CLOSED);
+	}
+
+	@Test
+	void changingToAWebHookUrlAlreadyTrackedByAnotherEventTypeReusesItsExistingState() {
+		// EVENT_TYPE starts on hooks/a (healthy); a second event type already
+		// uses hooks/b, degraded. Re-pointing EVENT_TYPE at hooks/b must NOT
+		// reset that shared history -- it should just join it.
+		subscribe();
+		subscriptionAdapter.save(new Subscription(CLIENT_ID, "debit_card_withdrawal", "https://client.example.com/hooks/b"));
+		degradeCircuitBreakerState("https://client.example.com/hooks/b");
+
+		subscriptionAdapter.save(new Subscription(CLIENT_ID, EVENT_TYPE, "https://client.example.com/hooks/b"));
+
+		WebhookCircuitBreakerEntity entity = findEntity("https://client.example.com/hooks/b");
+		assertThat(entity.getSuccessScore()).isEqualTo(10);
+		assertThat(entity.getTotalCalls()).isEqualTo(5);
+		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.OPEN);
+	}
+
+	@Test
+	void severalEventTypesPointingAtTheSameWebhookAccumulateFailuresOnTheSameBreaker() {
+		// Regression test: the circuit breaker must count per webhook, not per
+		// subscription -- two event types sharing one webhook should trip it
+		// together instead of each needing its own minimum-number-of-calls.
+		subscribe(); // EVENT_TYPE -> WEBHOOK_URL
+		subscriptionAdapter.save(new Subscription(CLIENT_ID, "debit_card_withdrawal", WEBHOOK_URL));
+		WebhookCircuitBreakerJpaAdapter breaker = breaker();
+
+		breaker.recordResult(CLIENT_ID, EVENT_TYPE, false);
+		breaker.recordResult(CLIENT_ID, "debit_card_withdrawal", false);
+		breaker.recordResult(CLIENT_ID, EVENT_TYPE, false);
+
+		WebhookCircuitBreakerEntity entity = findEntity();
+		assertThat(entity.getTotalCalls()).isEqualTo(3);
+		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.OPEN);
+		// Both event types are now blocked, even the one that never itself failed 3 times.
+		assertThat(breaker.isCallPermitted(CLIENT_ID, EVENT_TYPE)).isFalse();
+		assertThat(breaker.isCallPermitted(CLIENT_ID, "debit_card_withdrawal")).isFalse();
+	}
+
+	@Test
+	void doesNotMixDifferentClientsEvenIfTheyHappenToShareTheSameWebhookUrl() {
+		subscribe(); // CLIENT_ID -> WEBHOOK_URL
+		subscriptionAdapter.save(new Subscription("CLIENT002", EVENT_TYPE, WEBHOOK_URL));
+		WebhookCircuitBreakerJpaAdapter breaker = breaker();
+
+		breaker.recordResult(CLIENT_ID, EVENT_TYPE, false);
+		breaker.recordResult(CLIENT_ID, EVENT_TYPE, false);
+		breaker.recordResult(CLIENT_ID, EVENT_TYPE, false); // opens CLIENT_ID's breaker
+
+		assertThat(breaker.isCallPermitted(CLIENT_ID, EVENT_TYPE)).isFalse();
+		assertThat(breaker.isCallPermitted("CLIENT002", EVENT_TYPE)).isTrue();
+	}
+
+	@Test
+	void reSubscribingWithTheSameUrlDoesNotResetTheCircuitBreakerState() {
+		subscribe();
+		degradeCircuitBreakerState();
+
+		subscribe();
+
+		WebhookCircuitBreakerEntity entity = findEntity();
+		assertThat(entity.getSuccessScore()).isEqualTo(10);
+		assertThat(entity.getTotalCalls()).isEqualTo(5);
+		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.OPEN);
+	}
+
+	@Test
+	void findByUserIdReportsTheScoreAndClosedStateOfAHealthyWebhook() {
+		subscribe();
+
+		assertThat(subscriptionAdapter.findByUserId(CLIENT_ID))
+				.containsExactly(new SubscriptionStatus(CLIENT_ID, EVENT_TYPE, WEBHOOK_URL, 100, false));
+	}
+
+	@Test
+	void findByUserIdReportsOpenTrueOnceTheCircuitBreakerHasTripped() {
+		subscribe();
+		degradeCircuitBreakerState();
+
+		assertThat(subscriptionAdapter.findByUserId(CLIENT_ID))
+				.containsExactly(new SubscriptionStatus(CLIENT_ID, EVENT_TYPE, WEBHOOK_URL, 10, true));
+	}
+
+	private void degradeCircuitBreakerState() {
+		degradeCircuitBreakerState(WEBHOOK_URL);
+	}
+
+	private void degradeCircuitBreakerState(String webHookUrl) {
+		findEntity(webHookUrl).recordState(10, 5, WebhookCircuitState.OPEN, Instant.parse("2024-01-01T00:00:00Z"), 0);
+	}
+
 	private void openTheCircuit() {
 		subscribe();
 		WebhookCircuitBreakerJpaAdapter breaker = breaker();
@@ -181,12 +300,16 @@ class WebhookCircuitBreakerJpaAdapterTest extends AbstractPostgresIntegrationTes
 		subscriptionAdapter.save(new Subscription(CLIENT_ID, EVENT_TYPE, WEBHOOK_URL));
 	}
 
-	private SubscriptionEntity findEntity() {
-		return repository.findByUserIdAndEventType(CLIENT_ID, EVENT_TYPE).orElseThrow();
+	private WebhookCircuitBreakerEntity findEntity() {
+		return findEntity(WEBHOOK_URL);
+	}
+
+	private WebhookCircuitBreakerEntity findEntity(String webHookUrl) {
+		return repository.findByClientIdAndWebHookUrl(CLIENT_ID, webHookUrl).orElseThrow();
 	}
 
 	private WebhookCircuitBreakerJpaAdapter breaker() {
-		return new WebhookCircuitBreakerJpaAdapter(repository, properties, metricsPort, clock);
+		return new WebhookCircuitBreakerJpaAdapter(subscriptionRepository, repository, properties, metricsPort, clock);
 	}
 
 	private static final class MutableClock extends Clock {

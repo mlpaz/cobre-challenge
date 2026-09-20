@@ -2,22 +2,25 @@ package com.cobre.notification.adapter.out.subscription;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.time.Instant;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.cobre.notification.AbstractPostgresIntegrationTest;
+import com.cobre.notification.adapter.out.circuitbreaker.WebhookCircuitBreakerJpaRepository;
 import com.cobre.notification.domain.model.Subscription;
-import com.cobre.notification.domain.model.SubscriptionStatus;
-import com.cobre.notification.domain.model.WebhookCircuitState;
 
 /**
  * Full context against a real PostgreSQL instance (see
  * {@link AbstractPostgresIntegrationTest}), same approach as
  * NotificationRecordJpaAdapterTest: Boot 4 dropped @DataJpaTest.
+ *
+ * <p>Behavior that spans into the webhook circuit breaker's own state (new
+ * subscriptions starting healthy, a URL change resetting it, {@code
+ * findByUserId} reporting score/open) is covered by
+ * {@code WebhookCircuitBreakerJpaAdapterTest} instead, since asserting on it
+ * needs package-private access to {@code WebhookCircuitBreakerEntity}.
  */
 @SpringBootTest
 @Transactional
@@ -28,6 +31,9 @@ class SubscriptionJpaAdapterTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired
 	private SubscriptionJpaRepository repository;
+
+	@Autowired
+	private WebhookCircuitBreakerJpaRepository circuitBreakerRepository;
 
 	@Test
 	void returnsEmptyWhenThereIsNoSubscription() {
@@ -69,6 +75,29 @@ class SubscriptionJpaAdapterTest extends AbstractPostgresIntegrationTest {
 	}
 
 	@Test
+	void deletingTheOnlySubscriptionUsingAWebhookRemovesItsCircuitBreakerRow() {
+		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
+
+		adapter.delete("CLIENT001", "credit_card_payment");
+
+		assertThat(circuitBreakerRepository.findByClientIdAndWebHookUrl("CLIENT001",
+				"https://client.example.com/hooks/a")).isEmpty();
+	}
+
+	@Test
+	void deletingASubscriptionThatSharesAWebhookWithAnotherEventTypeKeepsTheCircuitBreakerRow() {
+		// Both event types point at the exact same webhook -- deleting one
+		// should not wipe out the shared breaker the other still relies on.
+		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
+		adapter.save(new Subscription("CLIENT001", "debit_card_withdrawal", "https://client.example.com/hooks/a"));
+
+		adapter.delete("CLIENT001", "credit_card_payment");
+
+		assertThat(circuitBreakerRepository.findByClientIdAndWebHookUrl("CLIENT001",
+				"https://client.example.com/hooks/a")).isPresent();
+	}
+
+	@Test
 	void deletingOneEventTypeDoesNotAffectAnotherSubscriptionOfTheSameUser() {
 		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
 		adapter.save(new Subscription("CLIENT001", "debit_card_withdrawal", "https://client.example.com/hooks/b"));
@@ -77,68 +106,5 @@ class SubscriptionJpaAdapterTest extends AbstractPostgresIntegrationTest {
 
 		assertThat(adapter.findWebHookUrl("CLIENT001", "debit_card_withdrawal"))
 				.contains("https://client.example.com/hooks/b");
-	}
-
-	@Test
-	void newSubscriptionsStartWithAHealthyCircuitBreakerState() {
-		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
-
-		SubscriptionEntity entity = entity();
-		assertThat(entity.getSuccessScore()).isEqualTo(100);
-		assertThat(entity.getTotalCalls()).isZero();
-		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.CLOSED);
-	}
-
-	@Test
-	void changingTheWebHookUrlResetsTheCircuitBreakerState() {
-		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/old"));
-		degradeCircuitBreakerState();
-
-		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/new"));
-
-		SubscriptionEntity entity = entity();
-		assertThat(entity.getSuccessScore()).isEqualTo(100);
-		assertThat(entity.getTotalCalls()).isZero();
-		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.CLOSED);
-	}
-
-	@Test
-	void reSubscribingWithTheSameUrlDoesNotResetTheCircuitBreakerState() {
-		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
-		degradeCircuitBreakerState();
-
-		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
-
-		SubscriptionEntity entity = entity();
-		assertThat(entity.getSuccessScore()).isEqualTo(10);
-		assertThat(entity.getTotalCalls()).isEqualTo(5);
-		assertThat(entity.getCircuitState()).isEqualTo(WebhookCircuitState.OPEN);
-	}
-
-	@Test
-	void findByUserIdReportsTheScoreAndClosedStateOfAHealthyWebhook() {
-		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
-
-		assertThat(adapter.findByUserId("CLIENT001")).containsExactly(
-				new SubscriptionStatus("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a", 100,
-						false));
-	}
-
-	@Test
-	void findByUserIdReportsOpenTrueOnceTheCircuitBreakerHasTripped() {
-		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
-		degradeCircuitBreakerState();
-
-		assertThat(adapter.findByUserId("CLIENT001")).containsExactly(
-				new SubscriptionStatus("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a", 10,
-						true));
-	}
-
-	private void degradeCircuitBreakerState() {
-		entity().recordCircuitState(10, 5, WebhookCircuitState.OPEN, Instant.parse("2024-01-01T00:00:00Z"), 0);
-	}
-
-	private SubscriptionEntity entity() {
-		return repository.findByUserIdAndEventType("CLIENT001", "credit_card_payment").orElseThrow();
 	}
 }

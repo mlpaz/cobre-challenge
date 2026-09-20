@@ -1,6 +1,7 @@
 package com.cobre.notification.adapter.out.persistence;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import org.springframework.stereotype.Component;
@@ -8,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.NotificationEvent;
+import com.cobre.notification.domain.model.RecoveredStuckEvent;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 
 @Component
@@ -42,7 +44,9 @@ public class NotificationRecordJpaAdapter implements NotificationRecordPort {
 
 	@Override
 	@Transactional
-	public int recoverStuckProcessing(Instant olderThan) {
-		return repository.failStuckProcessing(olderThan);
+	public List<RecoveredStuckEvent> recoverStuckProcessing(Instant olderThan) {
+		return repository.failStuckProcessing(olderThan).stream()
+				.map(row -> new RecoveredStuckEvent(row.getClientId(), row.getEventType()))
+				.toList();
 	}
 }

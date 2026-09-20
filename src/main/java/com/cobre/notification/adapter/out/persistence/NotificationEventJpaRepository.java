@@ -100,15 +100,24 @@ public interface NotificationEventJpaRepository extends JpaRepository<Notificati
 	 * means the process that claimed it died before calling {@link #complete}.
 	 * Flipping it to {@code FAILED} makes it replayable again through the
 	 * normal self-service {@code POST /notification_events/{id}/replay}
-	 * instead of staying claimed forever.
+	 * instead of staying claimed forever. {@code RETURNING} hands back the
+	 * identity of every recovered row in the same statement, so the caller
+	 * can tag a metric per event without a separate, potentially stale read.
 	 *
-	 * @return how many stuck rows were recovered.
+	 * @return one projection per recovered row.
 	 */
 	@Modifying(clearAutomatically = true)
 	@Query(value = """
 			UPDATE notification_events
 			SET delivery_status = 'FAILED'
 			WHERE delivery_status = 'PROCESSING' AND processed_at < :threshold
+			RETURNING client_id AS clientId, event_type AS eventType
 			""", nativeQuery = true)
-	int failStuckProcessing(@Param("threshold") Instant threshold);
+	List<StuckEventProjection> failStuckProcessing(@Param("threshold") Instant threshold);
+
+	interface StuckEventProjection {
+		String getClientId();
+
+		String getEventType();
+	}
 }

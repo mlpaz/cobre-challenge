@@ -20,6 +20,7 @@ import com.cobre.notification.AbstractPostgresIntegrationTest;
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
+import com.cobre.notification.domain.model.RecoveredStuckEvent;
 
 /**
  * Boot 4's spring-boot-test-autoconfigure dropped {@code @DataJpaTest}/
@@ -147,9 +148,9 @@ class NotificationRecordJpaAdapterTest extends AbstractPostgresIntegrationTest {
 	void recoverStuckProcessingFlipsOldClaimedRowsToFailed() {
 		adapter.tryClaim(event);
 
-		int recovered = adapter.recoverStuckProcessing(Instant.now().plusSeconds(60));
+		List<RecoveredStuckEvent> recovered = adapter.recoverStuckProcessing(Instant.now().plusSeconds(60));
 
-		assertThat(recovered).isEqualTo(1);
+		assertThat(recovered).containsExactly(new RecoveredStuckEvent("CLIENT001", "credit_card_payment"));
 		NotificationEventEntity saved = repository.findByClientIdAndEventId("CLIENT001", "EVT001").orElseThrow();
 		assertThat(saved.getDeliveryStatus()).isEqualTo(DeliveryStatus.FAILED);
 	}
@@ -158,9 +159,9 @@ class NotificationRecordJpaAdapterTest extends AbstractPostgresIntegrationTest {
 	void recoverStuckProcessingLeavesRecentClaimsAlone() {
 		adapter.tryClaim(event);
 
-		int recovered = adapter.recoverStuckProcessing(Instant.now().minusSeconds(60));
+		List<RecoveredStuckEvent> recovered = adapter.recoverStuckProcessing(Instant.now().minusSeconds(60));
 
-		assertThat(recovered).isZero();
+		assertThat(recovered).isEmpty();
 		NotificationEventEntity saved = repository.findByClientIdAndEventId("CLIENT001", "EVT001").orElseThrow();
 		assertThat(saved.getDeliveryStatus()).isEqualTo(DeliveryStatus.PROCESSING);
 	}

@@ -26,7 +26,7 @@ flowchart LR
         Core["Domain services<br/>(delivery, replay, query, subscription)"]
     end
 
-    DB[("PostgreSQL<br/>notification_events / subscriptions")]
+    DB[("PostgreSQL<br/>notification_events / subscriptions / webhook_circuit_breakers")]
     WebhookA["Webhook cliente A"]
     WebhookB["Webhook cliente B"]
     WebhookN["Webhook cliente N"]
@@ -42,8 +42,8 @@ flowchart LR
 ```
 
 - **Kafka**: fuente principal de eventos (`notification.events.topic`). El listener y el endpoint `POST /notification_events` alimentan el mismo caso de uso.
-- **PostgreSQL**: `notification_events` (resultado final de cada evento procesado, una fila por `client_id + event_id` — también la pieza que hace atómica la deduplicación y el control de concurrencia, ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)) y `subscriptions` (webhook activo por `user_id + event_type`, **más el score y el estado del circuit breaker de ese webhook** — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)).
-- **Webhook del cliente**: el servicio le pega directo por HTTPS (con retry, `WebhookHttpClient`) — no hay ningún intermediario. El circuit breaker vive por webhook, en la tabla `subscriptions` (ver [Suscripciones y webhooks](#suscripciones-y-webhooks)), así el webhook roto de un cliente no bloquea la entrega a los demás.
+- **PostgreSQL**: `notification_events` (resultado final de cada evento procesado, una fila por `client_id + event_id` — también la pieza que hace atómica la deduplicación y el control de concurrencia, ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)), `subscriptions` (webhook activo por `user_id + event_type`) y `webhook_circuit_breakers` (**score y estado del circuit breaker de ese webhook**, una fila por `(client_id, web_hook_url)` — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)).
+- **Webhook del cliente**: el servicio le pega directo por HTTPS (con retry, `WebhookHttpClient`) — no hay ningún intermediario. El circuit breaker vive por webhook, en `webhook_circuit_breakers` (ver [Suscripciones y webhooks](#suscripciones-y-webhooks)), así el webhook roto de un cliente no bloquea la entrega a los demás.
 
 ## Flujo principal
 
@@ -137,7 +137,7 @@ Si el proceso muere entre ganar el claim y llamar a `complete`, esa fila queda e
 
 ### Por qué esto es correcto entre réplicas, y no solo dentro de una instancia
 
-Antes de este cambio, la única defensa contra un duplicado era una caché en memoria por instancia — solo correcta corriendo una única réplica, porque dos instancias no se enteraban una de la otra. El claim atómico usa Postgres como única fuente de verdad compartida, así que hoy es correcto sin importar cuántas instancias del servicio estén corriendo al mismo tiempo: todas compiten por la misma fila, en la misma base — con o sin la caché best-effort de [Idempotencia](#idempotencia) delante (esa sí sigue siendo por-instancia en el perfil `local`, pero ahí nunca corre más de una réplica; en el resto de los perfiles es Redis, compartida). Mismo motivo por el que el circuit breaker vive en `subscriptions` y no en memoria (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). El único mecanismo que sigue siendo por-instancia en todo perfil es `RateLimitFilter`, documentado como tal en [Rate limiting](#rate-limiting).
+Antes de este cambio, la única defensa contra un duplicado era una caché en memoria por instancia — solo correcta corriendo una única réplica, porque dos instancias no se enteraban una de la otra. El claim atómico usa Postgres como única fuente de verdad compartida, así que hoy es correcto sin importar cuántas instancias del servicio estén corriendo al mismo tiempo: todas compiten por la misma fila, en la misma base — con o sin la caché best-effort de [Idempotencia](#idempotencia) delante (esa sí sigue siendo por-instancia en el perfil `local`, pero ahí nunca corre más de una réplica; en el resto de los perfiles es Redis, compartida). Mismo motivo por el que el circuit breaker vive en Postgres (tabla `webhook_circuit_breakers`) y no en memoria (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). El único mecanismo que sigue siendo por-instancia en todo perfil es `RateLimitFilter`, documentado como tal en [Rate limiting](#rate-limiting).
 
 ## Suscripciones y webhooks
 
@@ -151,9 +151,11 @@ Esa misma respuesta alimenta el circuit breaker de ese webhook (siguiente secci�
 
 ### Score y circuit breaker por webhook
 
-Cada webhook (cada fila de `subscriptions`) tiene su propio **circuit breaker independiente**: el webhook roto de un cliente nunca bloquea la entrega a los webhooks sanos de otros clientes.
+Cada **webhook físico** (cada `(client_id, web_hook_url)` distinto) tiene su propio **circuit breaker independiente**: el webhook roto de un cliente nunca bloquea la entrega a los webhooks sanos de otros clientes.
 
-El estado vive en la propia tabla `subscriptions`:
+El estado vive en su propia tabla, `webhook_circuit_breakers` — una fila por `(client_id, web_hook_url)`, con índice único sobre ese par. Se mantiene separada de `subscriptions` a propósito: qué webhook registró un cliente y cómo se viene comportando ese webhook son dos cosas distintas, que cambian por razones distintas y en momentos distintos — una no debería obligar a tocar la otra.
+
+**Por qué está scopeado por URL y no por suscripción**: un cliente puede apuntar varios `event_type` a la misma URL (el mismo endpoint recibiendo `credit_card_payment` y `debit_card_withdrawal`, por ejemplo). Si el breaker viviera por suscripción, cada `event_type` acumularía fallas por separado contra ese mismo endpoint — un webhook roto tardaría más en abrirse (cada `event_type` necesitando alcanzar su propio `minimum-number-of-calls`) y mientras tanto seguiría recibiendo tráfico real una vez por cada `event_type` que apunta a él, en vez de una sola vez. Con el breaker scopeado por `(client_id, web_hook_url)`, todos los `event_type` que comparten un webhook sí comparten su score y su estado: una falla contra ese endpoint cuenta para todos, así que el circuito se abre tan pronto como corresponde y protege al webhook por igual sin importar cuántos tipos de evento le apuntan.
 
 | Columna | Qué es |
 |---|---|
@@ -169,7 +171,7 @@ Transiciones (`WebhookCircuitBreakerJpaAdapter`):
 - **OPEN**: mientras está abierto, `NotificationDeliveryService` ni siquiera llama al webhook — el evento queda directamente como `CIRCUIT_OPEN` (se guarda igual, para poder consultarlo y reintentarlo).
 - **OPEN → HALF_OPEN**: al cumplirse `wait-duration-in-open-state` desde que se abrió, la siguiente entrega automática se deja pasar como prueba.
 - **HALF_OPEN**: deja pasar hasta `permitted-number-of-calls-in-half-open-state` intentos de prueba. Si uno falla, reabre (`OPEN`) inmediatamente. Si uno tiene éxito y el score ya recuperó el umbral, cierra (`CLOSED`).
-- **Cambiar la URL del webhook** (volver a llamar a `POST /subscriptions` con una URL distinta) resetea el score y el estado a `CLOSED` — es potencialmente un endpoint distinto, no arrastra el historial del anterior. Volver a mandar la misma URL no resetea nada.
+- **Cambiar la URL del webhook** (volver a llamar a `POST /subscriptions` con una URL distinta) mueve ese `event_type` al breaker de la nueva URL: si ningún otro `event_type` de ese cliente la usaba todavía, arranca sano (`CLOSED`, score 100) — es potencialmente un endpoint distinto, no arrastra el historial del anterior. Si la nueva URL ya la usa otro `event_type` de ese mismo cliente, se une al breaker que ya existe para ella (no lo resetea: ese historial sí es el real de ese endpoint). El breaker de la URL vieja se borra solo si ningún otro `event_type` de ese cliente sigue apuntándole. Volver a mandar la misma URL no cambia nada.
 
 | Property | Qué configura |
 |---|---|
@@ -238,7 +240,7 @@ Todas se emiten como counters (vía `MetricsPort`, hoy implementado con Datadog/
 | `notification.webhook.delivery_blocked` | `event_type`, `client_id`, `webhook` | Cada intento automático de entrega que se saltea porque el circuit breaker de ese webhook ya está `OPEN` (no se llegó a llamar al webhook). |
 | `notification.events.saved` | `delivery_status`, `client_id` | Cada vez que se persiste el resultado final de un evento en la base, agrupado por el estado guardado (`DELIVERED`, `FAILED`, `CIRCUIT_OPEN`, etc). |
 | `notification.security.access_denied` | `client_id` | Cada `USER_MISMATCH` (un `x-user-id` pidiendo/reintentando un evento que no le pertenece). |
-| `notification.events.stuck_processing_recovered` | — | Cada vez que el barrido de `StuckProcessingRecoveryJob` encuentra y recupera filas atascadas en `PROCESSING` (ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)). Debería ser siempre cero en operación normal — si no lo es, algo está muriendo a mitad de una entrega. |
+| `notification.events.stuck_processing_recovered` | `event_type`, `client_id`, `webhook` | Una vez por cada fila que el barrido de `StuckProcessingRecoveryJob` encuentra y recupera atascada en `PROCESSING` (ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)). `webhook` es `unknown` si la suscripción ya no existe al momento de recuperar. Debería ser siempre cero en operación normal — si no lo es, algo está muriendo a mitad de una entrega. |
 
 ## Seguridad
 
