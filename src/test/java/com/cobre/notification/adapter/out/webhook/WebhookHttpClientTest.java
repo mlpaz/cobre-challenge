@@ -10,6 +10,7 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 
@@ -72,6 +73,29 @@ class WebhookHttpClientTest {
 		assertThatThrownBy(() -> client.send(WEBHOOK_URL, request)).isInstanceOf(WebhookRejectedException.class);
 		server.verify();
 		verify(metricsPort).increment("notification.webhook.response", "status_code:400",
+				"event_type:credit_card_payment", "client_id:CLIENT001", "webhook:" + WEBHOOK_URL);
+		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", false);
+	}
+
+	@Test
+	void treatsARedirectAsARejectionInsteadOfASuccessfulDelivery() {
+		// RestClient's default error handler only throws for 4xx/5xx -- a 3xx
+		// would otherwise sail through toEntity() and get recorded as DELIVERED
+		// even though the webhook never actually accepted the event.
+		RestClient.Builder builder = RestClient.builder();
+		MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+		server.expect(requestTo(WEBHOOK_URL))
+				.andRespond(withStatus(HttpStatus.FOUND).location(URI.create("https://other-host.example.com/")));
+
+		WebhookHttpClient client = new WebhookHttpClient(builder.build(), properties(3, Duration.ofMillis(10)),
+				metricsPort, webhookCircuitBreakerPort);
+
+		assertThatThrownBy(() -> client.send(WEBHOOK_URL, request)).isInstanceOf(WebhookRejectedException.class);
+		server.verify();
+		// Not retried, same as a 4xx: this webhook's own response, not a
+		// transient network blip -- calling it again would just get the same
+		// redirect back.
+		verify(metricsPort).increment("notification.webhook.response", "status_code:302",
 				"event_type:credit_card_payment", "client_id:CLIENT001", "webhook:" + WEBHOOK_URL);
 		verify(webhookCircuitBreakerPort).recordResult("CLIENT001", "credit_card_payment", false);
 	}

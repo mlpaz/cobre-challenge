@@ -77,11 +77,25 @@ Antes de este camino, el servicio corta temprano si no hay webhook suscripto (`N
 
 ### Idempotencia
 
-La idempotencia no es una caché separada — es el mismo claim atómico en base que resuelve las race conditions (ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)): `event_id` es único a nivel plataforma, y una vez que un evento queda `DELIVERED`, ningún intento posterior (Kafka redeliver, un resend de la plataforma) vuelve a llamar al webhook — `NotificationRecordPort#tryClaim` lo rechaza directamente contra la fila persistida. No hay TTL ni ventana de expiración: es indefinido, porque la fuente de verdad es la propia tabla, no una caché.
+La fuente de verdad es el mismo claim atómico en base que resuelve las race conditions (ver [Concurrencia y race conditions](#concurrencia-y-race-conditions)): `event_id` es único a nivel plataforma, y una vez que un evento queda `DELIVERED`, ningún intento posterior (Kafka redeliver, un resend de la plataforma) vuelve a llamar al webhook — `NotificationRecordPort#tryClaim` lo rechaza directamente contra la fila persistida, indefinidamente, sin TTL.
+
+Delante de eso hay un `IdempotencyPort`, una caché **best-effort** (`isDuplicate` / `markAsProcessed`) que evita el round-trip a Postgres para el caso obvio — un evento que ya sabemos que se entregó. No es una segunda fuente de verdad: un miss simplemente cae al claim de Postgres, que es quien decide de verdad. La implementación cambia según el perfil:
+
+- **`local`**: `InMemoryIdempotencyCache`, un `ConcurrentHashMap` con TTL — no hace falta levantar Redis para correr la app en desarrollo.
+- **Cualquier otro perfil**: `RedisIdempotencyCache`, un `SET key EX ttl` / `GET` contra Redis.
+
+La razón de Redis en producción no es de corrección — el claim en Postgres ya es correcto sin importar cuántas instancias del servicio corran al mismo tiempo, porque todas comparten la misma base. Es de **costo**: sin una caché compartida entre nodos, cada instancia solo se acuerda de los eventos que ella misma procesó, así que un duplicado que cae en una instancia distinta a la que entregó el original no tiene forma de evitar el round-trip a Postgres (que ahora es una escritura — el `INSERT ... ON CONFLICT` de `tryClaim` — no una lectura gratis). Redis, al ser compartido entre nodos, filtra ese caso también, y esa escritura a Postgres nunca llega a pasar.
+
+| Property | Qué configura |
+|---|---|
+| `idempotency.ttl` | Cuánto tiempo se recuerda un `event_id` ya entregado en la caché (Redis o el mapa local), antes de volver a caer en el claim de Postgres. No afecta la corrección — solo cuántos duplicados se filtran antes de tocar la base. |
+| `spring.data.redis.host` / `spring.data.redis.port` | Conexión al Redis compartido (ignoradas en el perfil `local`, que no lo usa). |
 
 ### Retry
 
 `WebhookHttpClient` envuelve cada llamada directa al webhook del cliente con retry (Resilience4j), para absorber fallas transitorias (5xx, timeout, error de conexión) sin intervención manual. Un rechazo 4xx **no** se reintenta. Cada intento — el original y cada reintento — se registra por separado contra el [score del webhook](#score-y-circuit-breaker-por-webhook), no solo el resultado final.
+
+Solo un **2xx** cuenta como entrega exitosa — se valida explícitamente (`response.getStatusCode().is2xxSuccessful()`), no alcanza con "no tiró excepción": `RestClient` solo lanza excepción para 4xx/5xx por default, así que un 3xx (redirect) llegaría igual hasta ese punto y, sin el chequeo, se hubiera guardado como `DELIVERED` sin que el webhook realmente haya aceptado el evento. Los redirects tampoco se siguen automáticamente (`HttpURLConnection.setInstanceFollowRedirects(false)` vía `prepareConnection`) — así `WebhookHttpClient` ve siempre la respuesta real de la URL registrada, no la de a dónde esa URL redirige (que podría ser otro host, o un downgrade de `https` a `http`). Un 3xx se trata igual que un 4xx: rechazo, no reintentable — pegarle de nuevo a la misma URL daría el mismo redirect.
 
 | Property | Qué configura |
 |---|---|
@@ -123,7 +137,7 @@ Si el proceso muere entre ganar el claim y llamar a `complete`, esa fila queda e
 
 ### Por qué esto es correcto entre réplicas, y no solo dentro de una instancia
 
-El mecanismo anterior (una caché en memoria por instancia) solo era correcto corriendo una única réplica — dos instancias no se enteraban una de la otra. El claim atómico usa Postgres como única fuente de verdad compartida, así que es correcto sin importar cuántas instancias del servicio estén corriendo al mismo tiempo: todas compiten por la misma fila, en la misma base. Mismo motivo por el que el circuit breaker vive en `subscriptions` y no en memoria (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). El único mecanismo que sigue siendo por-instancia hoy es `RateLimitFilter`, documentado como tal en [Rate limiting](#rate-limiting).
+Antes de este cambio, la única defensa contra un duplicado era una caché en memoria por instancia — solo correcta corriendo una única réplica, porque dos instancias no se enteraban una de la otra. El claim atómico usa Postgres como única fuente de verdad compartida, así que hoy es correcto sin importar cuántas instancias del servicio estén corriendo al mismo tiempo: todas compiten por la misma fila, en la misma base — con o sin la caché best-effort de [Idempotencia](#idempotencia) delante (esa sí sigue siendo por-instancia en el perfil `local`, pero ahí nunca corre más de una réplica; en el resto de los perfiles es Redis, compartida). Mismo motivo por el que el circuit breaker vive en `subscriptions` y no en memoria (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). El único mecanismo que sigue siendo por-instancia en todo perfil es `RateLimitFilter`, documentado como tal en [Rate limiting](#rate-limiting).
 
 ## Suscripciones y webhooks
 
@@ -305,3 +319,5 @@ La API REST se documenta automáticamente con **SpringDoc OpenAPI** (`springdoc-
 **Necesita Docker corriendo.** Todos los tests con contexto Spring (`@SpringBootTest`) corren contra un **PostgreSQL real** (`org.testcontainers:postgresql`), no contra H2 — el proyecto no usa H2 en ningún lado. La razón: H2, incluso en modo compatibilidad PostgreSQL, no replica cómo PostgreSQL infiere el tipo de un parámetro al preparar una sentencia server-side. Un parámetro que solo aparece del lado del `IS NULL` en un `OR` (como `:status`/`:from`/`:to` en `NotificationEventJpaRepository#search` cuando esos filtros no vienen) no tiene de dónde sacar el tipo, y Postgres rechaza la query (`could not determine data type of parameter $n`) — un bug real que un test contra H2 nunca hubiera detectado. La consulta usa `CAST(... AS ...)` explícito en cada placeholder para evitarlo.
 
 El contenedor se levanta **una sola vez por corrida completa**, no uno por clase: `AbstractPostgresIntegrationTest` lo arranca en un bloque estático (`static { POSTGRES.start(); }`) y lo expone vía `@ServiceConnection`; como es un campo `static` de esa superclase, todas las clases de test que la extienden comparten el mismo contenedor ya corriendo — Testcontainers no lo reinicia por clase. El reaper de Testcontainers (Ryuk) lo apaga solo al terminar la JVM.
+
+`RedisIdempotencyCacheTest` sigue la misma filosofía contra un Redis real (`redis:7-alpine`, Testcontainers) — sin `@SpringBootTest`, ya que la clase solo necesita un `StringRedisTemplate` y levantar todo el contexto sería más lento sin aportar nada acá.

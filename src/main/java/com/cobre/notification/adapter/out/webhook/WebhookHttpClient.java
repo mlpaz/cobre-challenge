@@ -1,5 +1,7 @@
 package com.cobre.notification.adapter.out.webhook;
 
+import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.util.function.Supplier;
 
@@ -76,6 +78,19 @@ public class WebhookHttpClient {
 					.retrieve()
 					.toEntity(String.class);
 			recordWebhookResponse(request, webHookUrl, String.valueOf(response.getStatusCode().value()));
+			if (!response.getStatusCode().is2xxSuccessful()) {
+				// RestClient's default error handler only throws for 4xx/5xx, so a
+				// 3xx reaches here as a "success" unless we check explicitly --
+				// redirects are never auto-followed (see prepareConnection below),
+				// so this is exactly what the webhook itself returned. Treated like
+				// a 4xx rejection, not retried: hitting the same URL again would
+				// just get the same redirect back.
+				recordCircuitBreakerResult(request, false);
+				log.warn("Webhook returned a non-success status {} for event {}", response.getStatusCode().value(),
+						request.eventId());
+				throw new WebhookRejectedException("Webhook returned a non-success status " + response.getStatusCode()
+						+ " for event " + request.eventId(), null);
+			}
 			recordCircuitBreakerResult(request, true);
 			log.debug("Webhook responded {} for event {}", response.getStatusCode().value(), request.eventId());
 			return response.getBody();
@@ -113,7 +128,17 @@ public class WebhookHttpClient {
 	}
 
 	private static RestClient buildRestClient(WebhookHttpProperties properties) {
-		SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+		SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory() {
+			@Override
+			protected void prepareConnection(HttpURLConnection connection, String httpMethod) throws IOException {
+				super.prepareConnection(connection, httpMethod);
+				// Never follow redirects transparently: a 3xx could silently change
+				// host or scheme (http -> https downgrade risk included), and we
+				// want doPost() to see -- and explicitly reject -- exactly what the
+				// registered webhook URL itself returned, not wherever it points to.
+				connection.setInstanceFollowRedirects(false);
+			}
+		};
 		requestFactory.setConnectTimeout((int) properties.connectTimeout().toMillis());
 		requestFactory.setReadTimeout((int) properties.readTimeout().toMillis());
 		return RestClient.builder()

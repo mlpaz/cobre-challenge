@@ -11,6 +11,7 @@ import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.in.SendNotificationUseCase;
+import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.MetricsPort;
 import com.cobre.notification.domain.port.out.MetricsTags;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
@@ -23,15 +24,17 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 
 	private static final Logger log = LoggerFactory.getLogger(NotificationDeliveryService.class);
 
+	private final IdempotencyPort idempotencyPort;
 	private final SubscriptionPort subscriptionPort;
 	private final WebhookDeliveryPort webhookDeliveryPort;
 	private final NotificationRecordPort notificationRecordPort;
 	private final MetricsPort metricsPort;
 	private final WebhookCircuitBreakerPort webhookCircuitBreakerPort;
 
-	public NotificationDeliveryService(SubscriptionPort subscriptionPort, WebhookDeliveryPort webhookDeliveryPort,
-			NotificationRecordPort notificationRecordPort, MetricsPort metricsPort,
-			WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
+	public NotificationDeliveryService(IdempotencyPort idempotencyPort, SubscriptionPort subscriptionPort,
+			WebhookDeliveryPort webhookDeliveryPort, NotificationRecordPort notificationRecordPort,
+			MetricsPort metricsPort, WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
+		this.idempotencyPort = idempotencyPort;
 		this.subscriptionPort = subscriptionPort;
 		this.webhookDeliveryPort = webhookDeliveryPort;
 		this.notificationRecordPort = notificationRecordPort;
@@ -46,6 +49,16 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 		log.info("Received notification event {} type={} client={}", event.eventId(), event.eventType(),
 				event.clientId());
 		metricsPort.increment("notification.events.received", eventTypeTag, clientIdTag);
+
+		// Fast path only: a hit here skips a Postgres round-trip for an obvious
+		// duplicate, but it is never trusted on its own -- see IdempotencyPort
+		// and "Concurrencia y race conditions" in the README. A miss just falls
+		// through to the atomic claim below, which is what actually decides.
+		if (idempotencyPort.isDuplicate(event)) {
+			log.info("Notification event {} is a duplicate (fast path), skipping delivery", event.eventId());
+			metricsPort.increment("notification.events.duplicate", eventTypeTag, clientIdTag);
+			return new DeliveryResult(event.eventId(), DeliveryStatus.DUPLICATE, null);
+		}
 
 		Optional<String> webHookUrl = subscriptionPort.findWebHookUrl(event.clientId(), event.eventType());
 		if (webHookUrl.isEmpty()) {
@@ -97,6 +110,11 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 			}
 		}
 		notificationRecordPort.complete(event, result);
+		if (result.status() == DeliveryStatus.DELIVERED) {
+			// Only ever set on a confirmed success, same rule as before: a failed
+			// attempt must stay eligible for a legitimate automatic retry.
+			idempotencyPort.markAsProcessed(event);
+		}
 		log.info("Notification event {} saved with status={}", event.eventId(), result.status());
 		metricsPort.increment("notification.events.saved", MetricsTags.DELIVERY_STATUS.of(result.status()), clientIdTag);
 		return result;

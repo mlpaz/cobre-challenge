@@ -19,6 +19,7 @@ import com.cobre.notification.domain.exception.NotificationDeliveryException;
 import com.cobre.notification.domain.model.DeliveryResult;
 import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
+import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.MetricsPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
@@ -29,6 +30,9 @@ import com.cobre.notification.domain.port.out.WebhookDeliveryPort;
 class NotificationDeliveryServiceTest {
 
 	private static final String WEBHOOK_URL = "https://client.example.com/webhooks/notifications";
+
+	@Mock
+	private IdempotencyPort idempotencyPort;
 
 	@Mock
 	private SubscriptionPort subscriptionPort;
@@ -60,6 +64,9 @@ class NotificationDeliveryServiceTest {
 		assertThat(result).isEqualTo(expected);
 		verify(webhookDeliveryPort).deliver(event, WEBHOOK_URL);
 		verify(notificationRecordPort).complete(event, expected);
+		// Only a confirmed DELIVERED feeds the fast-path cache -- a failed
+		// attempt must stay eligible for a legitimate automatic retry.
+		verify(idempotencyPort).markAsProcessed(event);
 		// Recording the outcome against the webhook's circuit breaker score now
 		// happens per HTTP attempt inside WebhookHttpClient (so internal retries
 		// each count), not once here after deliver() returns.
@@ -103,6 +110,7 @@ class NotificationDeliveryServiceTest {
 
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null));
 		verify(notificationRecordPort).complete(event, new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null));
+		verify(idempotencyPort, never()).markAsProcessed(any());
 		verify(webhookCircuitBreakerPort, never()).recordResult(any(), any(), anyBoolean());
 		verify(metricsPort).increment("notification.events.saved", "delivery_status:FAILED", "client_id:CLIENT001");
 	}
@@ -121,6 +129,7 @@ class NotificationDeliveryServiceTest {
 		verify(webhookDeliveryPort, never()).deliver(any(), any());
 		verify(webhookCircuitBreakerPort, never()).recordResult(any(), any(), anyBoolean());
 		verify(notificationRecordPort).complete(event, new DeliveryResult(event.eventId(), DeliveryStatus.CIRCUIT_OPEN, null));
+		verify(idempotencyPort, never()).markAsProcessed(any());
 		verify(metricsPort).increment("notification.webhook.delivery_blocked", "event_type:credit_card_payment",
 				"client_id:CLIENT001", "webhook:" + WEBHOOK_URL);
 		verify(metricsPort).increment("notification.events.saved", "delivery_status:CIRCUIT_OPEN",
@@ -148,9 +157,28 @@ class NotificationDeliveryServiceTest {
 				"client_id:CLIENT001");
 	}
 
+	@Test
+	void returnsADuplicateResultWithoutTouchingSubscriptionOrClaimWhenTheFastPathCacheHitsIt() {
+		// The cache is only ever consulted, never trusted alone: a hit here is
+		// purely an optimization to avoid a Postgres round-trip -- see
+		// IdempotencyPort. tryClaim is what would actually decide otherwise.
+		NotificationDeliveryService service = newService();
+		NotificationEvent event = anEvent();
+		given(idempotencyPort.isDuplicate(event)).willReturn(true);
+
+		DeliveryResult result = service.sendNotification(event);
+
+		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.DUPLICATE, null));
+		verify(subscriptionPort, never()).findWebHookUrl(any(), any());
+		verify(notificationRecordPort, never()).tryClaim(any());
+		verify(notificationRecordPort, never()).complete(any(), any());
+		verify(metricsPort).increment("notification.events.duplicate", "event_type:credit_card_payment",
+				"client_id:CLIENT001");
+	}
+
 	private NotificationDeliveryService newService() {
-		return new NotificationDeliveryService(subscriptionPort, webhookDeliveryPort, notificationRecordPort,
-				metricsPort, webhookCircuitBreakerPort);
+		return new NotificationDeliveryService(idempotencyPort, subscriptionPort, webhookDeliveryPort,
+				notificationRecordPort, metricsPort, webhookCircuitBreakerPort);
 	}
 
 	private static NotificationEvent anEvent() {
