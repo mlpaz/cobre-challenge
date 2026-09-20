@@ -3,8 +3,7 @@ package com.cobre.notification.domain.port.out;
 /**
  * Per-webhook circuit breaker: each subscription (client_id + event_type)
  * tracks its own delivery success score, so a broken webhook only blocks
- * deliveries to that specific webhook — not to every other client sharing
- * the Notification Provider.
+ * deliveries to that specific webhook — not to every other client's webhook.
  */
 public interface WebhookCircuitBreakerPort {
 

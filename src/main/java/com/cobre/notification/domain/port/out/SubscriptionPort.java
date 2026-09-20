@@ -21,4 +21,7 @@ public interface SubscriptionPort {
 
 	/** @return every subscription for this user, one per event type. */
 	List<Subscription> findByUserId(String userId);
+
+	/** Deletes the subscription for this (user, event type) pair, if one exists. */
+	void delete(String userId, String eventType);
 }

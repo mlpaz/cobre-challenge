@@ -10,22 +10,23 @@ import org.springframework.transaction.annotation.Transactional;
 import com.cobre.notification.adapter.out.subscription.config.WebhookCircuitBreakerProperties;
 import com.cobre.notification.domain.model.WebhookCircuitState;
 import com.cobre.notification.domain.port.out.MetricsPort;
+import com.cobre.notification.domain.port.out.MetricsTags;
 import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
 
 /**
  * Circuit breaker scoped to a single webhook (one subscription row), so a
  * broken webhook only blocks deliveries to itself — never to another
- * client's webhook, the way a single Notification-Provider-wide breaker
+ * client's webhook, the way a single breaker shared across every webhook
  * would.
  *
  * <p>The score is an exponential moving average of recent outcomes (100 =
  * success, 0 = failure), so recent behavior matters more than old history
  * without needing to persist a literal call-by-call window. State
  * transitions otherwise follow a standard circuit breaker: CLOSED while
- * healthy; OPEN (fail fast, no provider call) once the score drops below
- * the configured threshold after enough calls; HALF_OPEN, after the open
- * wait elapses, lets a limited number of trial calls through to decide
- * whether to close again or reopen.
+ * healthy; OPEN (fail fast, no HTTP call to the webhook) once the score
+ * drops below the configured threshold after enough calls; HALF_OPEN, after
+ * the open wait elapses, lets a limited number of trial calls through to
+ * decide whether to close again or reopen.
  *
  * <p>Not component-scanned: wired as a bean by
  * {@link com.cobre.notification.adapter.out.subscription.config.WebhookCircuitBreakerConfig}
@@ -151,8 +152,8 @@ public class WebhookCircuitBreakerJpaAdapter implements WebhookCircuitBreakerPor
 		if (newState == WebhookCircuitState.OPEN && previousState != WebhookCircuitState.OPEN) {
 			log.warn("Circuit breaker opened for webhook client={} eventType={} score={}", clientId, eventType,
 					newScore);
-			metricsPort.increment("notification.webhook.circuit_opened", "event_type:" + eventType,
-					"client_id:" + clientId, "webhook:" + entity.getWebHookUrl());
+			metricsPort.increment("notification.webhook.circuit_opened", MetricsTags.EVENT_TYPE.of(eventType),
+					MetricsTags.CLIENT_ID.of(clientId), MetricsTags.WEBHOOK.of(entity.getWebHookUrl()));
 		}
 	}
 

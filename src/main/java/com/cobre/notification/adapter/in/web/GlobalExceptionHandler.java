@@ -16,6 +16,7 @@ import com.cobre.notification.domain.exception.NotificationEventAccessDeniedExce
 import com.cobre.notification.domain.exception.NotificationEventNotFoundException;
 import com.cobre.notification.domain.exception.SubscriptionNotFoundException;
 import com.cobre.notification.domain.port.out.MetricsPort;
+import com.cobre.notification.domain.port.out.MetricsTags;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -64,7 +65,7 @@ public class GlobalExceptionHandler {
 		// just the 400 response. See A09 in the README's Seguridad section.
 		log.warn("Access denied: x-user-id={} requested notification_event_id={} it does not own",
 				ex.requestedByUserId(), ex.notificationEventId());
-		metricsPort.increment("notification.security.access_denied", "client_id:" + ex.requestedByUserId());
+		metricsPort.increment("notification.security.access_denied", MetricsTags.CLIENT_ID.of(ex.requestedByUserId()));
 		return ResponseEntity.status(HttpStatus.BAD_REQUEST)
 				.body(new ErrorResponse("USER_MISMATCH", ex.getMessage()));
 	}

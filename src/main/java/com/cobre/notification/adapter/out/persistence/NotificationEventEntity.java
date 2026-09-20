@@ -41,8 +41,8 @@ public class NotificationEventEntity {
 	@Enumerated(EnumType.STRING)
 	private DeliveryStatus deliveryStatus;
 
-	@Column(name = "provider_reference")
-	private String providerReference;
+	@Column(name = "webhook_response")
+	private String webhookResponse;
 
 	@Column(name = "processed_at", nullable = false)
 	private Instant processedAt;
@@ -63,7 +63,7 @@ public class NotificationEventEntity {
 		this.content = event.content();
 		this.eventDeliveryDate = event.deliveryDate();
 		this.deliveryStatus = result.status();
-		this.providerReference = result.providerReference();
+		this.webhookResponse = result.webhookResponse();
 		this.processedAt = processedAt;
 	}
 
@@ -95,8 +95,8 @@ public class NotificationEventEntity {
 		return deliveryStatus;
 	}
 
-	public String getProviderReference() {
-		return providerReference;
+	public String getWebhookResponse() {
+		return webhookResponse;
 	}
 
 	public Instant getProcessedAt() {

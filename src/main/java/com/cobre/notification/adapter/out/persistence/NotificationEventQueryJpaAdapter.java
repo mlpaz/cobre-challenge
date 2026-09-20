@@ -50,7 +50,7 @@ public class NotificationEventQueryJpaAdapter implements NotificationEventQueryP
 				entity.getClientId(),
 				entity.getEventDeliveryDate(),
 				entity.getDeliveryStatus(),
-				entity.getProviderReference(),
+				entity.getWebhookResponse(),
 				entity.getProcessedAt());
 	}
 }

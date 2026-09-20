@@ -13,10 +13,11 @@ import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.in.SendNotificationUseCase;
 import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.MetricsPort;
-import com.cobre.notification.domain.port.out.NotificationProviderPort;
+import com.cobre.notification.domain.port.out.MetricsTags;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
 import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
+import com.cobre.notification.domain.port.out.WebhookDeliveryPort;
 
 @Service
 public class NotificationDeliveryService implements SendNotificationUseCase {
@@ -25,17 +26,17 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 
 	private final IdempotencyPort idempotencyPort;
 	private final SubscriptionPort subscriptionPort;
-	private final NotificationProviderPort notificationProviderPort;
+	private final WebhookDeliveryPort webhookDeliveryPort;
 	private final NotificationRecordPort notificationRecordPort;
 	private final MetricsPort metricsPort;
 	private final WebhookCircuitBreakerPort webhookCircuitBreakerPort;
 
 	public NotificationDeliveryService(IdempotencyPort idempotencyPort, SubscriptionPort subscriptionPort,
-			NotificationProviderPort notificationProviderPort, NotificationRecordPort notificationRecordPort,
+			WebhookDeliveryPort webhookDeliveryPort, NotificationRecordPort notificationRecordPort,
 			MetricsPort metricsPort, WebhookCircuitBreakerPort webhookCircuitBreakerPort) {
 		this.idempotencyPort = idempotencyPort;
 		this.subscriptionPort = subscriptionPort;
-		this.notificationProviderPort = notificationProviderPort;
+		this.webhookDeliveryPort = webhookDeliveryPort;
 		this.notificationRecordPort = notificationRecordPort;
 		this.metricsPort = metricsPort;
 		this.webhookCircuitBreakerPort = webhookCircuitBreakerPort;
@@ -43,8 +44,8 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 
 	@Override
 	public DeliveryResult sendNotification(NotificationEvent event) {
-		String eventTypeTag = "event_type:" + event.eventType();
-		String clientIdTag = "client_id:" + event.clientId();
+		String eventTypeTag = MetricsTags.EVENT_TYPE.of(event.eventType());
+		String clientIdTag = MetricsTags.CLIENT_ID.of(event.clientId());
 		log.info("Received notification event {} type={} client={}", event.eventId(), event.eventType(),
 				event.clientId());
 		metricsPort.increment("notification.events.received", eventTypeTag, clientIdTag);
@@ -61,16 +62,16 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 			metricsPort.increment("notification.subscription.webhook_not_found", eventTypeTag, clientIdTag);
 			return new DeliveryResult(event.eventId(), DeliveryStatus.NOT_SUBSCRIBED, null);
 		}
-		String webhookTag = "webhook:" + webHookUrl.get();
+		String webhookTag = MetricsTags.WEBHOOK.of(webHookUrl.get());
 		log.debug("Webhook subscription found for client={} eventType={}", event.clientId(), event.eventType());
 		metricsPort.increment("notification.subscription.webhook_found", eventTypeTag, clientIdTag, webhookTag);
 
 		DeliveryResult result;
 		if (!webhookCircuitBreakerPort.isCallPermitted(event.clientId(), event.eventType())) {
 			// This webhook's own score is below the configured threshold: fail fast
-			// without contacting the provider, instead of hammering a webhook that's
-			// already unhealthy. Still recorded, so it shows up in the query API and
-			// can be retried deliberately via replay (which bypasses this check).
+			// without calling it, instead of hammering a webhook that's already
+			// unhealthy. Still recorded, so it shows up in the query API and can be
+			// retried deliberately via replay (which bypasses this check).
 			log.warn("Circuit open for webhook client={} eventType={}, skipping delivery attempt", event.clientId(),
 					event.eventType());
 			metricsPort.increment("notification.webhook.delivery_blocked", eventTypeTag, clientIdTag, webhookTag);
@@ -79,9 +80,8 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 			try {
 				// The outbound adapter itself feeds each HTTP attempt's outcome
 				// (including internal retries) into the webhook's circuit breaker
-				// score — see NotificationProviderHttpClient — so nothing more to
-				// record here.
-				result = notificationProviderPort.deliver(event, webHookUrl.get());
+				// score — see WebhookHttpClient — so nothing more to record here.
+				result = webhookDeliveryPort.deliver(event, webHookUrl.get());
 				idempotencyPort.markAsProcessed(event);
 			} catch (NotificationDeliveryException e) {
 				// Delivery definitively failed (retries exhausted). We still answer
@@ -96,7 +96,7 @@ public class NotificationDeliveryService implements SendNotificationUseCase {
 		}
 		notificationRecordPort.save(event, result);
 		log.info("Notification event {} saved with status={}", event.eventId(), result.status());
-		metricsPort.increment("notification.events.saved", "delivery_status:" + result.status(), clientIdTag);
+		metricsPort.increment("notification.events.saved", MetricsTags.DELIVERY_STATUS.of(result.status()), clientIdTag);
 		return result;
 	}
 }

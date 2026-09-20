@@ -11,6 +11,6 @@ public record NotificationEventDetailResponse(
 		String clientId,
 		Instant deliveryDate,
 		String deliveryStatus,
-		String providerReference,
+		String webhookResponse,
 		Instant processedAt) {
 }

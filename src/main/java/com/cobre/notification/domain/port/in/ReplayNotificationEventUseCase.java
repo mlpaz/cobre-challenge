@@ -11,7 +11,7 @@ public interface ReplayNotificationEventUseCase {
 	/**
 	 * Re-attempts delivery of a previously recorded event. A no-op (returns
 	 * {@link com.cobre.notification.domain.model.DeliveryStatus#DUPLICATE}
-	 * without contacting the provider) if the event is already DELIVERED.
+	 * without calling the webhook again) if the event is already DELIVERED.
 	 *
 	 * @throws NotificationEventNotFoundException    when no event exists with this id
 	 * @throws NotificationEventAccessDeniedException when the event exists but does not

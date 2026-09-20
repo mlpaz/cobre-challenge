@@ -3,6 +3,7 @@ package com.cobre.notification.adapter.in.web;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.verify;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -24,6 +25,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.cobre.notification.domain.exception.SubscriptionNotFoundException;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.port.in.DeleteSubscriptionUseCase;
 import com.cobre.notification.domain.port.in.QuerySubscriptionsUseCase;
 import com.cobre.notification.domain.port.in.SubscribeUseCase;
 import com.cobre.notification.domain.port.in.UpdateSubscriptionUseCase;
@@ -51,6 +53,9 @@ class SubscriptionControllerTest {
 	@Mock
 	private QuerySubscriptionsUseCase querySubscriptionsUseCase;
 
+	@Mock
+	private DeleteSubscriptionUseCase deleteSubscriptionUseCase;
+
 	private MockMvc mockMvc;
 
 	@BeforeEach
@@ -59,7 +64,7 @@ class SubscriptionControllerTest {
 				.propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
 				.build();
 		mockMvc = MockMvcBuilders.standaloneSetup(new SubscriptionController(subscribeUseCase,
-						updateSubscriptionUseCase, querySubscriptionsUseCase))
+						updateSubscriptionUseCase, querySubscriptionsUseCase, deleteSubscriptionUseCase))
 				.setControllerAdvice(new GlobalExceptionHandler(Mockito.mock(MetricsPort.class)))
 				.setMessageConverters(new JacksonJsonHttpMessageConverter(jsonMapper))
 				.build();
@@ -192,6 +197,33 @@ class SubscriptionControllerTest {
 		mockMvc.perform(put("/subscriptions/credit_card_payment")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content(payload))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.code").value("MISSING_HEADER"));
+	}
+
+	@Test
+	void deletesAnExistingSubscriptionAndReturnsNoContent() throws Exception {
+		mockMvc.perform(delete("/subscriptions/credit_card_payment")
+						.header("x-user-id", "CLIENT001"))
+				.andExpect(status().isNoContent());
+
+		verify(deleteSubscriptionUseCase).delete("CLIENT001", "credit_card_payment");
+	}
+
+	@Test
+	void returnsNotFoundWhenDeletingASubscriptionThatDoesNotExist() throws Exception {
+		Mockito.doThrow(new SubscriptionNotFoundException("CLIENT001", "credit_card_payment"))
+				.when(deleteSubscriptionUseCase).delete("CLIENT001", "credit_card_payment");
+
+		mockMvc.perform(delete("/subscriptions/credit_card_payment")
+						.header("x-user-id", "CLIENT001"))
+				.andExpect(status().isNotFound())
+				.andExpect(jsonPath("$.code").value("SUBSCRIPTION_NOT_FOUND"));
+	}
+
+	@Test
+	void returnsBadRequestWhenDeletingWithoutTheUserIdHeader() throws Exception {
+		mockMvc.perform(delete("/subscriptions/credit_card_payment"))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.code").value("MISSING_HEADER"));
 	}

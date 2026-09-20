@@ -5,11 +5,11 @@
 - **Java 27** (toolchain fijado en `build.gradle`)
 - **Gradle 9.7.1** (via wrapper, `./gradlew`)
 - **Spring Boot 4.1.1**, PostgreSQL + Flyway, Spring Kafka, Resilience4j (retry), Datadog (DogStatsD), SpringDoc OpenAPI
-- **Virtual threads** (`spring.threads.virtual.enabled=true`): todo el I/O de este servicio es bloqueante (RestClient, JPA, el servlet container) — no hay nada reactivo. Los virtual threads dejan escalar ese I/O bloqueante (muchas conexiones esperando respuesta a la vez: DB, Kafka, el Notification Provider) sin necesitar un stack reactivo ni tunear pools de threads a mano.
+- **Virtual threads** (`spring.threads.virtual.enabled=true`): todo el I/O de este servicio es bloqueante (RestClient, JPA, el servlet container) — no hay nada reactivo. Los virtual threads dejan escalar ese I/O bloqueante (muchas conexiones esperando respuesta a la vez: DB, Kafka, los webhooks de los clientes) sin necesitar un stack reactivo ni tunear pools de threads a mano.
 
 ## Descripción
 
-Servicio que consume eventos generados por la plataforma (vía Kafka, o vía HTTP para pruebas), los deduplica, busca si el cliente tiene un webhook suscripto a ese tipo de evento, entrega el evento a través de un **Notification Provider** externo (que reenvía al webhook del cliente), y persiste el resultado de cada intento. Expone además una API de self-service para consultar el historial de eventos por cliente y reintentar (`replay`) los que fallaron.
+Servicio que consume eventos generados por la plataforma (vía Kafka, o vía HTTP para pruebas), los deduplica, busca si el cliente tiene un webhook suscripto a ese tipo de evento, entrega el evento llamando directamente por HTTPS al webhook del cliente, y persiste el resultado de cada intento. Expone además una API de self-service para consultar el historial de eventos por cliente y reintentar (`replay`) los que fallaron.
 
 Arquitectura hexagonal: el dominio (`domain/`) no conoce Kafka, HTTP, Postgres ni Datadog — solo define puertos (`port/in`, `port/out`) que los adaptadores (`adapter/in`, `adapter/out`) implementan.
 
@@ -28,7 +28,6 @@ flowchart LR
     end
 
     DB[("PostgreSQL<br/>notification_events / subscriptions")]
-    Provider["Notification Provider<br/>(servicio HTTP externo)"]
     WebhookA["Webhook cliente A"]
     WebhookB["Webhook cliente B"]
     WebhookN["Webhook cliente N"]
@@ -39,16 +38,15 @@ flowchart LR
     API --> Core
     Core <--> Idem
     Core <--> DB
-    Core -->|deliver event + webhook URL| Provider
-    Provider --> WebhookA
-    Provider --> WebhookB
-    Provider --> WebhookN
+    Core -->|POST directo, con retry| WebhookA
+    Core -->|POST directo, con retry| WebhookB
+    Core -->|POST directo, con retry| WebhookN
 ```
 
 - **Kafka**: fuente principal de eventos (`notification.events.topic`). El listener y el endpoint `POST /notification_events` alimentan el mismo caso de uso.
 - **PostgreSQL**: `notification_events` (resultado final de cada evento procesado, una fila por `client_id + event_id`) y `subscriptions` (webhook activo por `user_id + event_type`, **más el score y el estado del circuit breaker de ese webhook** — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)).
 - **Idempotency cache**: mapa en memoria (`InMemoryIdempotencyStore`), clave = `event_id`, TTL configurable. Evita reentregar un evento ya delivered dentro de la ventana; el estado durable de "ya entregado" vive en la DB (`delivery_status`), no acá (más detalle en [Idempotencia y resiliencia](#idempotencia-y-resiliencia)).
-- **Notification Provider**: servicio externo al que le pegamos por HTTP (con retry); es quien efectivamente llama al webhook del cliente. El circuit breaker vive por webhook, en la tabla `subscriptions` (ver [Suscripciones y webhooks](#suscripciones-y-webhooks)), así el webhook roto de un cliente no bloquea la entrega a los demás.
+- **Webhook del cliente**: el servicio le pega directo por HTTPS (con retry, `WebhookHttpClient`) — no hay ningún intermediario. El circuit breaker vive por webhook, en la tabla `subscriptions` (ver [Suscripciones y webhooks](#suscripciones-y-webhooks)), así el webhook roto de un cliente no bloquea la entrega a los demás.
 
 ## Flujo principal
 
@@ -59,16 +57,16 @@ sequenceDiagram
     participant Origen as Kafka / HTTP
     participant UseCase as SendNotificationUseCase
     participant Repo as Repository Port
-    participant Provider as NotificationProviderPort
+    participant Delivery as WebhookDeliveryPort
     participant Webhook as Webhook del cliente
 
     Origen->>UseCase: evento
     UseCase->>Repo: busca webhook suscripto (client_id + event_type)
     Repo-->>UseCase: webhook URL
-    UseCase->>Provider: deliver(event, webhookUrl)
-    Provider->>Webhook: entrega la notificación
-    Webhook-->>Provider: respuesta
-    Provider-->>UseCase: DeliveryResult (DELIVERED / FAILED)
+    UseCase->>Delivery: deliver(event, webhookUrl)
+    Delivery->>Webhook: POST directo al webhook
+    Webhook-->>Delivery: respuesta
+    Delivery-->>UseCase: DeliveryResult (DELIVERED / FAILED)
     UseCase->>Repo: guarda el resultado
 ```
 
@@ -90,16 +88,15 @@ Es una caché en memoria de una sola instancia — no es la fuente de verdad. El
 
 ### Retry
 
-`NotificationProviderHttpClient` envuelve cada llamada al Notification Provider con retry (Resilience4j), para absorber fallas transitorias (5xx, timeout, error de conexión) sin intervención manual. Un rechazo 4xx **no** se reintenta. Cada intento — el original y cada reintento — se registra por separado contra el [score del webhook](#score-y-circuit-breaker-por-webhook), no solo el resultado final.
+`WebhookHttpClient` envuelve cada llamada directa al webhook del cliente con retry (Resilience4j), para absorber fallas transitorias (5xx, timeout, error de conexión) sin intervención manual. Un rechazo 4xx **no** se reintenta. Cada intento — el original y cada reintento — se registra por separado contra el [score del webhook](#score-y-circuit-breaker-por-webhook), no solo el resultado final.
 
 | Property | Qué configura |
 |---|---|
-| `notification.provider.path` | Path del Notification Provider al que se hace `POST`. |
-| `notification.provider.connect-timeout` | Timeout para establecer la conexión TCP. |
-| `notification.provider.read-timeout` | Timeout de lectura de la respuesta una vez conectado. |
-| `notification.provider.retry.max-attempts` | Cantidad máxima de intentos (incluye el primero) ante fallas transitorias. |
-| `notification.provider.retry.wait-duration` | Espera base entre reintentos. |
-| `notification.provider.retry.exponential-backoff-multiplier` | Multiplicador aplicado a `wait-duration` en cada intento sucesivo (con 200ms y multiplicador 2.0: 200ms, 400ms, 800ms...). |
+| `notification.webhook.delivery.connect-timeout` | Timeout para establecer la conexión TCP con el webhook. |
+| `notification.webhook.delivery.read-timeout` | Timeout de lectura de la respuesta una vez conectado. |
+| `notification.webhook.delivery.retry.max-attempts` | Cantidad máxima de intentos (incluye el primero) ante fallas transitorias. |
+| `notification.webhook.delivery.retry.wait-duration` | Espera base entre reintentos. |
+| `notification.webhook.delivery.retry.exponential-backoff-multiplier` | Multiplicador aplicado a `wait-duration` en cada intento sucesivo (con 200ms y multiplicador 2.0: 200ms, 400ms, 800ms...). |
 
 Un evento cuya entrega falla definitivamente (reintentos agotados, o circuit breaker de ese webhook abierto — ver [Suscripciones y webhooks](#suscripciones-y-webhooks)) queda registrado (`delivery_status=FAILED` o `CIRCUIT_OPEN`) y puede reintentarse explícitamente vía `POST /notification_events/{id}/replay` — ver [API de self-service](#api-de-self-service-consulta-y-reintento-de-eventos).
 
@@ -109,9 +106,9 @@ Un evento cuya entrega falla definitivamente (reintentos agotados, o circuit bre
 
 `POST /subscriptions` registra, para el cliente indicado en el header `x-user-id`, la URL de webhook a la que quiere recibir las notificaciones de un tipo de evento (`SubscriptionService` → tabla `subscriptions`, única fila por `user_id + event_type`; volver a suscribirse con el mismo par actualiza la URL en vez de duplicar la fila). El `user_id` sale siempre del header, nunca del body — así no se puede suscribir en nombre de otro cliente solo con conocer su `user_id`.
 
-Cuando llega un evento de ese tipo para ese cliente, `NotificationDeliveryService` busca esa URL (`SubscriptionPort.findWebHookUrl`) y se la pasa al **Notification Provider** externo junto con el evento (`NotificationProviderHttpClient` → `POST` al provider, con el `webhook_url` como parte del payload). Es el Notification Provider quien efectivamente hace la llamada HTTPS al webhook del cliente — este servicio nunca le pega directo al webhook. La respuesta que el provider recibe de esa llamada (status code) es lo que determina si el evento queda `DELIVERED` o `FAILED`.
+Cuando llega un evento de ese tipo para ese cliente, `NotificationDeliveryService` busca esa URL (`SubscriptionPort.findWebHookUrl`) y `WebhookHttpClient` hace un `POST` HTTPS directo a esa URL con el evento como body — no hay ningún intermediario entre este servicio y el webhook del cliente. La respuesta de esa llamada (status code) es lo que determina si el evento queda `DELIVERED` o `FAILED`; el cuerpo de la respuesta se guarda (recortado a 1000 caracteres) como `webhook_response`.
 
-Esa misma respuesta alimenta el circuit breaker de ese webhook (siguiente sección) — y lo hace **por cada intento HTTP real**, no una sola vez por evento: si `NotificationProviderHttpClient` reintenta internamente (ver [Retry](#retry)) porque una respuesta fue transitoriamente mala, cada intento individual — el que falló y el que finalmente tuvo éxito — se registra por separado contra el score. Un evento que falla una vez y se recupera al reintentar cuenta como una falla **y** un éxito para ese webhook, no se colapsa en un solo resultado.
+Esa misma respuesta alimenta el circuit breaker de ese webhook (siguiente sección) — y lo hace **por cada intento HTTP real**, no una sola vez por evento: si `WebhookHttpClient` reintenta internamente (ver [Retry](#retry)) porque una respuesta fue transitoriamente mala, cada intento individual — el que falló y el que finalmente tuvo éxito — se registra por separado contra el score. Un evento que falla una vez y se recupera al reintentar cuenta como una falla **y** un éxito para ese webhook, no se colapsa en un solo resultado.
 
 ### Score y circuit breaker por webhook
 
@@ -121,16 +118,16 @@ El estado vive en la propia tabla `subscriptions`:
 
 | Columna | Qué es |
 |---|---|
-| `success_score` | Score 0-100: % de éxito reciente de ese webhook. Se recalcula en cada **intento HTTP real** contra el Notification Provider — incluidos los reintentos internos de Resilience4j, cada uno por separado, no solo el resultado final de la entrega — como un promedio ponderado (`score = score_anterior × (1 − α) + resultado × α`, con `resultado` = 100 si tuvo éxito o 0 si falló). Así los resultados recientes pesan más que el historial viejo, sin necesidad de guardar cada llamada individual. |
+| `success_score` | Score 0-100: % de éxito reciente de ese webhook. Se recalcula en cada **intento HTTP real** contra el webhook — incluidos los reintentos internos de Resilience4j, cada uno por separado, no solo el resultado final de la entrega — como un promedio ponderado (`score = score_anterior × (1 − α) + resultado × α`, con `resultado` = 100 si tuvo éxito o 0 si falló). Así los resultados recientes pesan más que el historial viejo, sin necesidad de guardar cada llamada individual. |
 | `total_calls` | Cantidad de intentos HTTP contabilizados para ese webhook (uno por cada intento real, no por evento). |
-| `circuit_state` | `CLOSED` (sano, entrega normal), `OPEN` (bloqueado, no se llama al provider) o `HALF_OPEN` (probando de nuevo con cupo limitado). |
+| `circuit_state` | `CLOSED` (sano, entrega normal), `OPEN` (bloqueado, no se llama al webhook) o `HALF_OPEN` (probando de nuevo con cupo limitado). |
 | `circuit_opened_at` | Cuándo se abrió el circuito por última vez (usado para saber cuándo pasar a `HALF_OPEN`). |
 | `half_open_calls` | Cuántas llamadas de prueba ya se dejaron pasar en el estado `HALF_OPEN`. |
 
 Transiciones (`WebhookCircuitBreakerJpaAdapter`):
 
 - **CLOSED → OPEN**: cuando, después de al menos `minimum-number-of-calls` intentos, el score queda por debajo de `min-success-score`.
-- **OPEN**: mientras está abierto, `NotificationDeliveryService` ni siquiera llama al Notification Provider para ese webhook — el evento queda directamente como `CIRCUIT_OPEN` (se guarda igual, para poder consultarlo y reintentarlo).
+- **OPEN**: mientras está abierto, `NotificationDeliveryService` ni siquiera llama al webhook — el evento queda directamente como `CIRCUIT_OPEN` (se guarda igual, para poder consultarlo y reintentarlo).
 - **OPEN → HALF_OPEN**: al cumplirse `wait-duration-in-open-state` desde que se abrió, la siguiente entrega automática se deja pasar como prueba.
 - **HALF_OPEN**: deja pasar hasta `permitted-number-of-calls-in-half-open-state` intentos de prueba. Si uno falla, reabre (`OPEN`) inmediatamente. Si uno tiene éxito y el score ya recuperó el umbral, cierra (`CLOSED`).
 - **Cambiar la URL del webhook** (volver a llamar a `POST /subscriptions` con una URL distinta) resetea el score y el estado a `CLOSED` — es potencialmente un endpoint distinto, no arrastra el historial del anterior. Volver a mandar la misma URL no resetea nada.
@@ -168,7 +165,7 @@ Devuelve el detalle completo de un evento puntual.
 Reintenta la entrega de un evento puntual.
 
 - **Misma validación de seguridad que el GET por id**: `400` si el `x-user-id` no es el dueño del evento, `404` si no existe.
-- **No-op si ya está `DELIVERED`**: devuelve `DUPLICATE` sin volver a llamar al provider — el `delivery_status` persistido es la fuente de verdad de "ya se entregó", no una caché en memoria.
+- **No-op si ya está `DELIVERED`**: devuelve `DUPLICATE` sin volver a llamar al webhook — el `delivery_status` persistido es la fuente de verdad de "ya se entregó", no una caché en memoria.
 - **Se ejecuta sin importar el circuit breaker ni la caché de idempotencia** — las dos cosas que sí frenan el flujo automático:
   - **Circuit breaker**: aunque el webhook esté `OPEN`, el replay igual intenta la entrega real — es la vía deliberada para recuperar un evento puntual sin esperar la ventana de `HALF_OPEN` (ver [Score y circuit breaker por webhook](#score-y-circuit-breaker-por-webhook)). Su resultado sí se registra en el score, así que una racha de replays exitosos puede cerrar el circuito antes de tiempo.
   - **Idempotencia**: `NotificationEventReplayService` nunca consulta la caché de duplicados (ver [Idempotencia](#idempotencia)) — esa caché existe para el flujo automático, no para decidir si un reintento manual puede ejecutarse.
@@ -181,6 +178,7 @@ Reintenta la entrega de un evento puntual.
 | `POST` | `/subscriptions` | Crea o actualiza el webhook del cliente indicado en `x-user-id` para un tipo de evento. Body: `event_type`, `web_hook_url`. |
 | `GET` | `/subscriptions` | Lista las suscripciones del cliente indicado en `x-user-id` (una fila por `event_type`). |
 | `PUT` | `/subscriptions/{event_type}` | Actualiza el webhook de una suscripción existente del cliente en `x-user-id`. A diferencia del `POST`, no crea una suscripción nueva: `404` (`SUBSCRIPTION_NOT_FOUND`) si no existía. |
+| `DELETE` | `/subscriptions/{event_type}` | Elimina la suscripción del cliente en `x-user-id` para ese `event_type`. `204` sin body si se borró; `404` (`SUBSCRIPTION_NOT_FOUND`) si no existía. |
 | `GET` | `/health` | Liveness check. |
 
 ## Métricas
@@ -195,9 +193,9 @@ Todas se emiten como counters (vía `MetricsPort`, hoy implementado con Datadog/
 | `notification.events.duplicate` | `event_type`, `client_id` | Eventos descartados por el chequeo de idempotencia (ya habían sido entregados). Sirve para medir cuántos duplicados llegan. |
 | `notification.subscription.webhook_found` | `event_type`, `client_id`, `webhook` | Búsquedas de suscripción que encontraron un webhook activo para ese `client_id` + `event_type`. |
 | `notification.subscription.webhook_not_found` | `event_type`, `client_id` | Búsquedas sin suscripción — el evento no se puede entregar (misses de suscripción; no hay `webhook` porque justamente no se encontró ninguno). |
-| `notification.webhook.response` | `status_code`, `event_type`, `client_id`, `webhook` | Cada respuesta del Notification Provider (éxito, rechazo 4xx, error 5xx) o `status_code:timeout` si no hubo respuesta. Permite monitorear la salud de la entrega a los webhooks por código de respuesta. |
+| `notification.webhook.response` | `status_code`, `event_type`, `client_id`, `webhook` | Cada respuesta del webhook del cliente (éxito, rechazo 4xx, error 5xx) o `status_code:timeout` si no hubo respuesta. Permite monitorear la salud de la entrega a los webhooks por código de respuesta. |
 | `notification.webhook.circuit_opened` | `event_type`, `client_id`, `webhook` | Se emite en el momento exacto en que el circuit breaker de un webhook pasa a `OPEN` (o reabre desde `HALF_OPEN`). Pensada para alertar apenas un webhook puntual empieza a fallar. |
-| `notification.webhook.delivery_blocked` | `event_type`, `client_id`, `webhook` | Cada intento automático de entrega que se saltea porque el circuit breaker de ese webhook ya está `OPEN` (no se llegó a llamar al provider). |
+| `notification.webhook.delivery_blocked` | `event_type`, `client_id`, `webhook` | Cada intento automático de entrega que se saltea porque el circuit breaker de ese webhook ya está `OPEN` (no se llegó a llamar al webhook). |
 | `notification.events.saved` | `delivery_status`, `client_id` | Cada vez que se persiste el resultado final de un evento en la base, agrupado por el estado guardado (`DELIVERED`, `FAILED`, `CIRCUIT_OPEN`, etc). |
 | `notification.security.access_denied` | `client_id` | Cada `USER_MISMATCH` (un `x-user-id` pidiendo/reintentando un evento que no le pertenece). |
 
@@ -234,6 +232,14 @@ El [rate limiting](#rate-limiting) es por IP — no hay autenticación (ver A01/
 
 **Propuesta de mitigación**: límite explícito de tamaño de body (`server.tomcat.max-http-form-post-size` / un filtro dedicado), y migrar la clave del rate limit de IP a `client_id` una vez exista autenticación (A01/A07) — no depende de una librería nueva, solo de tener una identidad confiable para usar como clave.
 
+### A10:2021 — Server-Side Request Forgery (SSRF)
+
+`WebhookHttpClient` hace un `POST` HTTPS server-side directo a la URL exacta que el cliente registró en `POST /subscriptions` (`web_hook_url`), sin validar el destino más allá del formato (`@URL`, ver A02). Nada impide registrar una URL que apunte a infraestructura interna — metadata del cloud (`http://169.254.169.254/...`), servicios en `localhost` o en la VPC — el servicio la llamaría igual.
+
+**Impacto**: un cliente puede usar este servicio como proxy para alcanzar recursos internos que de otra forma no serían accesibles desde afuera (metadata de la nube, servicios internos sin autenticación propia).
+
+**Propuesta de mitigación**: en el mismo `ConstraintValidator` de A02 (o en un chequeo previo a cada intento de entrega, no solo al suscribirse — por DNS rebinding), resolver el host y rechazar IPs privadas/loopback/link-local (RFC 1918, `127.0.0.0/8`, `169.254.0.0/16`, etc.).
+
 ## Rate limiting
 
 Ver A05 en [Seguridad](#seguridad): mientras no haya autenticación (A01/A07) no hay una identidad confiable para usar como clave, así que `RateLimitFilter` limita requests por **IP del caller** (primer hop de `X-Forwarded-For` si está detrás de un proxy/load balancer, si no `getRemoteAddr()`), con un token bucket en memoria por IP — permite ráfagas cortas hasta la capacidad configurada, y se recarga a un ritmo constante. Mismo caveat que `InMemoryIdempotencyStore`: es por instancia, no compartido entre réplicas.
@@ -241,7 +247,7 @@ Ver A05 en [Seguridad](#seguridad): mientras no haya autenticación (A01/A07) no
 Dos niveles, cada uno con su propio balde (no comparten cupo):
 
 - **`general`**: cualquier request bajo `/notification_events` o `/subscriptions` que no caiga en el nivel `strict`.
-- **`strict`**: `POST /subscriptions` y `POST /notification_events/{id}/replay` — las operaciones de mayor riesgo (`POST /subscriptions` es el vector del A01 de arriba) y más costosas (disparan una llamada saliente real). Se trackean por separado entre sí — agotar el cupo de `replay` no afecta el de `subscribe`.
+- **`strict`**: `POST /subscriptions`, `PUT /subscriptions/{event_type}`, `DELETE /subscriptions/{event_type}` y `POST /notification_events/{id}/replay` — las operaciones de mayor riesgo (`POST /subscriptions` es el vector del A01 de arriba) y más costosas (disparan una llamada saliente real, o cambian a quién le llega una notificación). Los tres endpoints de `/subscriptions` comparten un único balde — agotarlo con un `POST` también bloquea el `PUT`/`DELETE` de ese IP hasta que recargue; el balde de `replay` es independiente.
 
 `/health`, `/v3/api-docs` y `/swagger-ui/**` no tienen límite.
 

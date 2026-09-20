@@ -71,4 +71,25 @@ class SubscriptionServiceTest {
 
 		assertThat(service.listByUserId("CLIENT001")).isEqualTo(subscriptions);
 	}
+
+	@Test
+	void deletesAnExistingSubscription() {
+		SubscriptionService service = new SubscriptionService(subscriptionPort);
+		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment"))
+				.willReturn(Optional.of("https://client.example.com/webhooks/a"));
+
+		service.delete("CLIENT001", "credit_card_payment");
+
+		verify(subscriptionPort).delete("CLIENT001", "credit_card_payment");
+	}
+
+	@Test
+	void throwsWhenDeletingASubscriptionThatDoesNotExist() {
+		SubscriptionService service = new SubscriptionService(subscriptionPort);
+		given(subscriptionPort.findWebHookUrl("CLIENT001", "credit_card_payment")).willReturn(Optional.empty());
+
+		assertThatThrownBy(() -> service.delete("CLIENT001", "credit_card_payment"))
+				.isInstanceOf(SubscriptionNotFoundException.class);
+		verify(subscriptionPort, never()).delete(any(), any());
+	}
 }

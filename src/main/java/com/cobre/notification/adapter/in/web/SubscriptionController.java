@@ -4,6 +4,7 @@ import java.util.List;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -17,6 +18,7 @@ import com.cobre.notification.adapter.in.web.dto.SubscriptionRequest;
 import com.cobre.notification.adapter.in.web.dto.SubscriptionResponse;
 import com.cobre.notification.adapter.in.web.dto.SubscriptionUpdateRequest;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.port.in.DeleteSubscriptionUseCase;
 import com.cobre.notification.domain.port.in.QuerySubscriptionsUseCase;
 import com.cobre.notification.domain.port.in.SubscribeUseCase;
 import com.cobre.notification.domain.port.in.UpdateSubscriptionUseCase;
@@ -37,13 +39,16 @@ public class SubscriptionController {
 	private final SubscribeUseCase subscribeUseCase;
 	private final UpdateSubscriptionUseCase updateSubscriptionUseCase;
 	private final QuerySubscriptionsUseCase querySubscriptionsUseCase;
+	private final DeleteSubscriptionUseCase deleteSubscriptionUseCase;
 
 	public SubscriptionController(SubscribeUseCase subscribeUseCase,
 			UpdateSubscriptionUseCase updateSubscriptionUseCase,
-			QuerySubscriptionsUseCase querySubscriptionsUseCase) {
+			QuerySubscriptionsUseCase querySubscriptionsUseCase,
+			DeleteSubscriptionUseCase deleteSubscriptionUseCase) {
 		this.subscribeUseCase = subscribeUseCase;
 		this.updateSubscriptionUseCase = updateSubscriptionUseCase;
 		this.querySubscriptionsUseCase = querySubscriptionsUseCase;
+		this.deleteSubscriptionUseCase = deleteSubscriptionUseCase;
 	}
 
 	@Operation(summary = "Crea o actualiza el webhook del cliente autenticado para un tipo de evento",
@@ -91,5 +96,19 @@ public class SubscriptionController {
 		Subscription subscription = new Subscription(userId, eventType, request.webHookUrl());
 		updateSubscriptionUseCase.update(subscription);
 		return ResponseEntity.ok(new SubscriptionResponse(userId, eventType, request.webHookUrl()));
+	}
+
+	@Operation(summary = "Elimina la suscripción del cliente autenticado para un tipo de evento",
+			description = "Falla con 404 si el cliente autenticado no tiene una suscripción para ese event_type.")
+	@ApiResponse(responseCode = "204", description = "Suscripción eliminada")
+	@ApiResponse(responseCode = "400", description = "Falta el header x-user-id")
+	@ApiResponse(responseCode = "404", description = "No existe una suscripción de ese cliente para ese event_type")
+	@DeleteMapping("/{event_type}")
+	public ResponseEntity<Void> delete(
+			@Parameter(description = "Identificador del cliente dueño de la suscripción", required = true)
+			@RequestHeader(USER_ID_HEADER) String userId,
+			@PathVariable("event_type") String eventType) {
+		deleteSubscriptionUseCase.delete(userId, eventType);
+		return ResponseEntity.noContent().build();
 	}
 }

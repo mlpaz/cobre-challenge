@@ -21,10 +21,10 @@ import com.cobre.notification.domain.model.DeliveryStatus;
 import com.cobre.notification.domain.model.NotificationEvent;
 import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.MetricsPort;
-import com.cobre.notification.domain.port.out.NotificationProviderPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
 import com.cobre.notification.domain.port.out.WebhookCircuitBreakerPort;
+import com.cobre.notification.domain.port.out.WebhookDeliveryPort;
 
 @ExtendWith(MockitoExtension.class)
 class NotificationDeliveryServiceTest {
@@ -38,7 +38,7 @@ class NotificationDeliveryServiceTest {
 	private SubscriptionPort subscriptionPort;
 
 	@Mock
-	private NotificationProviderPort notificationProviderPort;
+	private WebhookDeliveryPort webhookDeliveryPort;
 
 	@Mock
 	private NotificationRecordPort notificationRecordPort;
@@ -57,17 +57,17 @@ class NotificationDeliveryServiceTest {
 		given(idempotencyPort.isDuplicate(event)).willReturn(false);
 		given(subscriptionPort.findWebHookUrl(event.clientId(), event.eventType())).willReturn(Optional.of(WEBHOOK_URL));
 		given(webhookCircuitBreakerPort.isCallPermitted(event.clientId(), event.eventType())).willReturn(true);
-		given(notificationProviderPort.deliver(event, WEBHOOK_URL)).willReturn(expected);
+		given(webhookDeliveryPort.deliver(event, WEBHOOK_URL)).willReturn(expected);
 
 		DeliveryResult result = service.sendNotification(event);
 
 		assertThat(result).isEqualTo(expected);
-		verify(notificationProviderPort).deliver(event, WEBHOOK_URL);
+		verify(webhookDeliveryPort).deliver(event, WEBHOOK_URL);
 		verify(idempotencyPort).markAsProcessed(event);
 		verify(notificationRecordPort).save(event, expected);
 		// Recording the outcome against the webhook's circuit breaker score now
-		// happens per HTTP attempt inside NotificationProviderHttpClient (so
-		// internal retries each count), not once here after deliver() returns.
+		// happens per HTTP attempt inside WebhookHttpClient (so internal retries
+		// each count), not once here after deliver() returns.
 		verify(webhookCircuitBreakerPort, never()).recordResult(any(), any(), anyBoolean());
 		verify(metricsPort).increment("notification.events.received", "event_type:credit_card_payment",
 				"client_id:CLIENT001");
@@ -77,7 +77,7 @@ class NotificationDeliveryServiceTest {
 	}
 
 	@Test
-	void returnsNotSubscribedWithoutCallingTheProviderWhenThereIsNoWebHookUrl() {
+	void returnsNotSubscribedWithoutCallingTheWebhookWhenThereIsNoWebHookUrl() {
 		NotificationDeliveryService service = newService();
 		NotificationEvent event = anEvent();
 		given(idempotencyPort.isDuplicate(event)).willReturn(false);
@@ -86,7 +86,7 @@ class NotificationDeliveryServiceTest {
 		DeliveryResult result = service.sendNotification(event);
 
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.NOT_SUBSCRIBED, null));
-		verify(notificationProviderPort, never()).deliver(any(), any());
+		verify(webhookDeliveryPort, never()).deliver(any(), any());
 		verify(idempotencyPort, never()).markAsProcessed(any());
 		verify(notificationRecordPort, never()).save(any(), any());
 		verify(metricsPort).increment("notification.subscription.webhook_not_found", "event_type:credit_card_payment",
@@ -100,7 +100,7 @@ class NotificationDeliveryServiceTest {
 		given(idempotencyPort.isDuplicate(event)).willReturn(false);
 		given(subscriptionPort.findWebHookUrl(event.clientId(), event.eventType())).willReturn(Optional.of(WEBHOOK_URL));
 		given(webhookCircuitBreakerPort.isCallPermitted(event.clientId(), event.eventType())).willReturn(true);
-		given(notificationProviderPort.deliver(any(), any())).willThrow(new NotificationDeliveryException("boom", null));
+		given(webhookDeliveryPort.deliver(any(), any())).willThrow(new NotificationDeliveryException("boom", null));
 
 		DeliveryResult result = service.sendNotification(event);
 
@@ -122,7 +122,7 @@ class NotificationDeliveryServiceTest {
 		DeliveryResult result = service.sendNotification(event);
 
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.CIRCUIT_OPEN, null));
-		verify(notificationProviderPort, never()).deliver(any(), any());
+		verify(webhookDeliveryPort, never()).deliver(any(), any());
 		verify(webhookCircuitBreakerPort, never()).recordResult(any(), any(), anyBoolean());
 		verify(notificationRecordPort).save(event, new DeliveryResult(event.eventId(), DeliveryStatus.CIRCUIT_OPEN, null));
 		verify(metricsPort).increment("notification.webhook.delivery_blocked", "event_type:credit_card_payment",
@@ -141,14 +141,14 @@ class NotificationDeliveryServiceTest {
 
 		assertThat(result).isEqualTo(new DeliveryResult(event.eventId(), DeliveryStatus.DUPLICATE, null));
 		verify(subscriptionPort, never()).findWebHookUrl(any(), any());
-		verify(notificationProviderPort, never()).deliver(any(), any());
+		verify(webhookDeliveryPort, never()).deliver(any(), any());
 		verify(notificationRecordPort, never()).save(any(), any());
 		verify(metricsPort).increment("notification.events.duplicate", "event_type:credit_card_payment",
 				"client_id:CLIENT001");
 	}
 
 	private NotificationDeliveryService newService() {
-		return new NotificationDeliveryService(idempotencyPort, subscriptionPort, notificationProviderPort,
+		return new NotificationDeliveryService(idempotencyPort, subscriptionPort, webhookDeliveryPort,
 				notificationRecordPort, metricsPort, webhookCircuitBreakerPort);
 	}
 

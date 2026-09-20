@@ -47,7 +47,7 @@ class NotificationRecordJpaAdapterTest {
 		assertThat(saved.getNotificationEventId()).isNotNull();
 		assertThat(saved.getEventType()).isEqualTo("credit_card_payment");
 		assertThat(saved.getDeliveryStatus()).isEqualTo(DeliveryStatus.DELIVERED);
-		assertThat(saved.getProviderReference()).isEqualTo("ref-123");
+		assertThat(saved.getWebhookResponse()).isEqualTo("ref-123");
 	}
 
 	@Test
@@ -61,6 +61,6 @@ class NotificationRecordJpaAdapterTest {
 		NotificationEventEntity afterReplay = repository.findByClientIdAndEventId("CLIENT001", "EVT001").orElseThrow();
 		assertThat(afterReplay.getNotificationEventId()).isEqualTo(firstAttempt.getNotificationEventId());
 		assertThat(afterReplay.getDeliveryStatus()).isEqualTo(DeliveryStatus.DELIVERED);
-		assertThat(afterReplay.getProviderReference()).isEqualTo("ref-456");
+		assertThat(afterReplay.getWebhookResponse()).isEqualTo("ref-456");
 	}
 }

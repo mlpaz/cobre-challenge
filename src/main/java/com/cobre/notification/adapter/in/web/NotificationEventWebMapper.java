@@ -29,7 +29,7 @@ final class NotificationEventWebMapper {
 		return new NotificationEventResponse(
 				result.eventId(),
 				result.status().name(),
-				result.providerReference());
+				result.webhookResponse());
 	}
 
 	static NotificationEventDetailResponse toDetailResponse(NotificationEventRecord record) {
@@ -41,7 +41,7 @@ final class NotificationEventWebMapper {
 				record.clientId(),
 				record.eventDeliveryDate(),
 				record.deliveryStatus().name(),
-				record.providerReference(),
+				record.webhookResponse(),
 				record.processedAt());
 	}
 

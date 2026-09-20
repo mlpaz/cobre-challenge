@@ -6,13 +6,15 @@ import org.springframework.stereotype.Service;
 
 import com.cobre.notification.domain.exception.SubscriptionNotFoundException;
 import com.cobre.notification.domain.model.Subscription;
+import com.cobre.notification.domain.port.in.DeleteSubscriptionUseCase;
 import com.cobre.notification.domain.port.in.QuerySubscriptionsUseCase;
 import com.cobre.notification.domain.port.in.SubscribeUseCase;
 import com.cobre.notification.domain.port.in.UpdateSubscriptionUseCase;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
 
 @Service
-public class SubscriptionService implements SubscribeUseCase, UpdateSubscriptionUseCase, QuerySubscriptionsUseCase {
+public class SubscriptionService implements SubscribeUseCase, UpdateSubscriptionUseCase, QuerySubscriptionsUseCase,
+		DeleteSubscriptionUseCase {
 
 	private final SubscriptionPort subscriptionPort;
 
@@ -36,5 +38,13 @@ public class SubscriptionService implements SubscribeUseCase, UpdateSubscription
 	@Override
 	public List<Subscription> listByUserId(String userId) {
 		return subscriptionPort.findByUserId(userId);
+	}
+
+	@Override
+	public void delete(String userId, String eventType) {
+		if (subscriptionPort.findWebHookUrl(userId, eventType).isEmpty()) {
+			throw new SubscriptionNotFoundException(userId, eventType);
+		}
+		subscriptionPort.delete(userId, eventType);
 	}
 }

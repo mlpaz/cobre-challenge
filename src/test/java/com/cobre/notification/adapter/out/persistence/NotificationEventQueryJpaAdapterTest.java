@@ -87,10 +87,10 @@ class NotificationEventQueryJpaAdapterTest {
 	}
 
 	private void save(String eventId, String clientId, Instant deliveryDate, DeliveryStatus status,
-			String providerReference) {
+			String webhookResponse) {
 		NotificationEvent event = new NotificationEvent(eventId, "credit_card_payment", "Payment received",
 				deliveryDate, clientId);
-		recordAdapter.save(event, new DeliveryResult(eventId, status, providerReference));
+		recordAdapter.save(event, new DeliveryResult(eventId, status, webhookResponse));
 	}
 
 	private UUID idOf(String clientId, String eventId) {

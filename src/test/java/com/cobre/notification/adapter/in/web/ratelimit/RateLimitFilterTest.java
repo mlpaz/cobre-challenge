@@ -46,6 +46,14 @@ class RateLimitFilterTest {
 	}
 
 	@Test
+	void tracksDeleteSubscriptionUnderTheSameStrictBucketAsSubscribe() throws Exception {
+		RateLimitFilter filter = newFilter(10, 1);
+
+		assertThat(perform(filter, "POST", "/subscriptions").getStatus()).isEqualTo(200);
+		assertThat(perform(filter, "DELETE", "/subscriptions/credit_card_payment").getStatus()).isEqualTo(429);
+	}
+
+	@Test
 	void tracksReplaySeparatelyFromSubscribeWithinTheStrictTier() throws Exception {
 		RateLimitFilter filter = newFilter(10, 1);
 

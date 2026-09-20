@@ -25,7 +25,7 @@ import tools.jackson.databind.json.JsonMapper;
  * is open, or delivery definitely failed after the outbound adapter's own
  * retry strategy is exhausted): it always returns a result and records it.
  * We deliberately do not fail this listener on a bad outcome — throwing here
- * would make Kafka redeliver the record and hammer the provider again on top
+ * would make Kafka redeliver the record and hammer the webhook again on top
  * of the retry strategy that already ran. Only a genuinely unexpected
  * exception (e.g. a malformed message) propagates to the listener
  * container's error handler, which applies a bounded backoff before giving up

@@ -64,6 +64,26 @@ class SubscriptionJpaAdapterTest {
 	}
 
 	@Test
+	void deletesAnExistingSubscription() {
+		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
+
+		adapter.delete("CLIENT001", "credit_card_payment");
+
+		assertThat(adapter.findWebHookUrl("CLIENT001", "credit_card_payment")).isEmpty();
+	}
+
+	@Test
+	void deletingOneEventTypeDoesNotAffectAnotherSubscriptionOfTheSameUser() {
+		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
+		adapter.save(new Subscription("CLIENT001", "debit_card_withdrawal", "https://client.example.com/hooks/b"));
+
+		adapter.delete("CLIENT001", "credit_card_payment");
+
+		assertThat(adapter.findWebHookUrl("CLIENT001", "debit_card_withdrawal"))
+				.contains("https://client.example.com/hooks/b");
+	}
+
+	@Test
 	void newSubscriptionsStartWithAHealthyCircuitBreakerState() {
 		adapter.save(new Subscription("CLIENT001", "credit_card_payment", "https://client.example.com/hooks/a"));
 

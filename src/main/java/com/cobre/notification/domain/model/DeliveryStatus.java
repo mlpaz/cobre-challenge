@@ -5,6 +5,6 @@ public enum DeliveryStatus {
 	DUPLICATE,
 	NOT_SUBSCRIBED,
 	FAILED,
-	/** Skipped without contacting the provider: the webhook's circuit breaker is open. */
+	/** Skipped without calling the webhook: its circuit breaker is open. */
 	CIRCUIT_OPEN
 }

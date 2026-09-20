@@ -11,4 +11,6 @@ public interface SubscriptionJpaRepository extends JpaRepository<SubscriptionEnt
 	Optional<SubscriptionEntity> findByUserIdAndEventType(String userId, String eventType);
 
 	List<SubscriptionEntity> findByUserIdOrderByEventTypeAsc(String userId);
+
+	void deleteByUserIdAndEventType(String userId, String eventType);
 }

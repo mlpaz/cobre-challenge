@@ -18,9 +18,9 @@ public class OpenApiConfig {
 		return new OpenAPI()
 				.info(new Info()
 						.title("Notification Service API")
-						.description("Recibe eventos de la plataforma, los entrega al webhook suscripto de cada "
-								+ "cliente a través del Notification Provider, y expone un historial consultable "
-								+ "con soporte de replay.")
+						.description("Recibe eventos de la plataforma, los entrega directamente al webhook "
+								+ "suscripto de cada cliente, y expone un historial consultable con soporte "
+								+ "de replay.")
 						.version("v1"));
 	}
 }

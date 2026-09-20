@@ -20,8 +20,8 @@ import tools.jackson.databind.json.JsonMapper;
  * to key on (see the Seguridad section in the README — A05). Two tiers:
  * {@code general} for every request under /notification_events and
  * /subscriptions, and a stricter {@code strict} tier — tracked separately per
- * endpoint — for POST /subscriptions, PUT /subscriptions/{event_type} and
- * POST /notification_events/{id}/replay.
+ * endpoint — for POST /subscriptions, PUT /subscriptions/{event_type},
+ * DELETE /subscriptions/{event_type} and POST /notification_events/{id}/replay.
  */
 @Component
 public class RateLimitFilter extends OncePerRequestFilter {
@@ -60,7 +60,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
 		if ("POST".equals(method) && "/subscriptions".equals(path)) {
 			return subscriptionsLimiter;
 		}
-		if ("PUT".equals(method) && path.matches(SUBSCRIPTION_EVENT_TYPE_PATH_PATTERN)) {
+		if (("PUT".equals(method) || "DELETE".equals(method)) && path.matches(SUBSCRIPTION_EVENT_TYPE_PATH_PATTERN)) {
 			return subscriptionsLimiter;
 		}
 		if ("POST".equals(method) && path.matches(REPLAY_PATH_PATTERN)) {

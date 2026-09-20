@@ -91,7 +91,7 @@ class NotificationControllerTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.event_id").value("EVT001"))
 				.andExpect(jsonPath("$.delivery_status").value("DELIVERED"))
-				.andExpect(jsonPath("$.provider_reference").value("ref-123"));
+				.andExpect(jsonPath("$.webhook_response").value("ref-123"));
 	}
 
 	@Test
@@ -225,7 +225,7 @@ class NotificationControllerTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.event_id").value("EVT001"))
 				.andExpect(jsonPath("$.delivery_status").value("DELIVERED"))
-				.andExpect(jsonPath("$.provider_reference").value("ref-456"));
+				.andExpect(jsonPath("$.webhook_response").value("ref-456"));
 	}
 
 	@Test

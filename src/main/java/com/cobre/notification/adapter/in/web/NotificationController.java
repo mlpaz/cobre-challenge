@@ -107,7 +107,7 @@ public class NotificationController {
 	}
 
 	@Operation(summary = "Reintenta la entrega de un evento",
-			description = "No-op (sin volver a llamar al provider) si el evento ya está DELIVERED.")
+			description = "No-op (sin volver a llamar al webhook) si el evento ya está DELIVERED.")
 	@ApiResponse(responseCode = "200", description = "Resultado del reintento")
 	@ApiResponse(responseCode = "400", description = "El evento no pertenece al x-user-id indicado")
 	@ApiResponse(responseCode = "404", description = "No existe un evento con ese id")

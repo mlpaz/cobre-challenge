@@ -15,25 +15,25 @@ import com.cobre.notification.domain.model.NotificationEventRecord;
 import com.cobre.notification.domain.port.in.ReplayNotificationEventUseCase;
 import com.cobre.notification.domain.port.out.IdempotencyPort;
 import com.cobre.notification.domain.port.out.NotificationEventQueryPort;
-import com.cobre.notification.domain.port.out.NotificationProviderPort;
 import com.cobre.notification.domain.port.out.NotificationRecordPort;
 import com.cobre.notification.domain.port.out.SubscriptionPort;
+import com.cobre.notification.domain.port.out.WebhookDeliveryPort;
 
 @Service
 public class NotificationEventReplayService implements ReplayNotificationEventUseCase {
 
 	private final NotificationEventQueryPort queryPort;
 	private final SubscriptionPort subscriptionPort;
-	private final NotificationProviderPort notificationProviderPort;
+	private final WebhookDeliveryPort webhookDeliveryPort;
 	private final NotificationRecordPort notificationRecordPort;
 	private final IdempotencyPort idempotencyPort;
 
 	public NotificationEventReplayService(NotificationEventQueryPort queryPort, SubscriptionPort subscriptionPort,
-			NotificationProviderPort notificationProviderPort, NotificationRecordPort notificationRecordPort,
+			WebhookDeliveryPort webhookDeliveryPort, NotificationRecordPort notificationRecordPort,
 			IdempotencyPort idempotencyPort) {
 		this.queryPort = queryPort;
 		this.subscriptionPort = subscriptionPort;
-		this.notificationProviderPort = notificationProviderPort;
+		this.webhookDeliveryPort = webhookDeliveryPort;
 		this.notificationRecordPort = notificationRecordPort;
 		this.idempotencyPort = idempotencyPort;
 	}
@@ -47,10 +47,10 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 		}
 
 		// delivery_status is the durable source of truth for "already handled":
-		// a replay on an already-delivered event is a no-op instead of
-		// notifying the provider again.
+		// a replay on an already-delivered event is a no-op instead of calling
+		// the webhook again.
 		if (record.deliveryStatus() == DeliveryStatus.DELIVERED) {
-			return new DeliveryResult(record.eventId(), DeliveryStatus.DUPLICATE, record.providerReference());
+			return new DeliveryResult(record.eventId(), DeliveryStatus.DUPLICATE, record.webhookResponse());
 		}
 
 		NotificationEvent event = new NotificationEvent(record.eventId(), record.eventType(), record.content(),
@@ -66,11 +66,11 @@ public class NotificationEventReplayService implements ReplayNotificationEventUs
 		// outbound adapter never consults isCallPermitted from here), so it can
 		// still recover an event even while the automatic flow is
 		// short-circuiting that webhook. Its outcome still feeds the score —
-		// see NotificationProviderHttpClient — so a run of successful replays
-		// can close the circuit again.
+		// see WebhookHttpClient — so a run of successful replays can close the
+		// circuit again.
 		DeliveryResult result;
 		try {
-			result = notificationProviderPort.deliver(event, webHookUrl.get());
+			result = webhookDeliveryPort.deliver(event, webHookUrl.get());
 			idempotencyPort.markAsProcessed(event);
 		} catch (NotificationDeliveryException e) {
 			result = new DeliveryResult(event.eventId(), DeliveryStatus.FAILED, null);

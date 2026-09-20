@@ -39,4 +39,10 @@ public class SubscriptionJpaAdapter implements SubscriptionPort {
 				.map(entity -> new Subscription(entity.getUserId(), entity.getEventType(), entity.getWebHookUrl()))
 				.toList();
 	}
+
+	@Override
+	@Transactional
+	public void delete(String userId, String eventType) {
+		repository.deleteByUserIdAndEventType(userId, eventType);
+	}
 }
